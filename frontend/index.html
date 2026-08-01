@@ -41,6 +41,41 @@
   button:disabled {
     opacity: 0.5;
   }
+  #detectedTextsWrap {
+    margin-top: 16px;
+  }
+  #detectedTextsWrap h2 {
+    font-size: 1em;
+    margin-bottom: 8px;
+  }
+  #detectedTextsList {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  #detectedTextsList li {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-family: monospace;
+  }
+  #detectedTextsList li.disabled {
+    opacity: 0.45;
+    text-decoration: line-through;
+  }
+  #detectedTextsList .text-id {
+    color: #888;
+    flex-shrink: 0;
+  }
+  #detectedTextsList .text-content {
+    word-break: break-all;
+  }
 </style>
 </head>
 <body>
@@ -66,6 +101,11 @@
   <canvas id="canvas"></canvas>
 </div>
 
+<div id="detectedTextsWrap">
+  <h2>検出された文字列</h2>
+  <ul id="detectedTextsList"></ul>
+</div>
+
 <script>
 const BACKEND_URL = "http://localhost:8000/api/detect-text";
 const DRAG_THRESHOLD_PX = 4; // これ未満の移動はドラッグではなくクリックとして扱う
@@ -75,10 +115,11 @@ const downloadBtn = document.getElementById("downloadBtn");
 const statusEl = document.getElementById("status");
 const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d");
+const detectedTextsList = document.getElementById("detectedTextsList");
 
 const state = {
   image: null,
-  boxes: [],       // { id, x, y, w, h } 画像の原寸座標
+  boxes: [],       // { id, x, y, w, h, text } 画像の原寸座標
   mosaicType: "black",
   nextManualId: 1,
 };
@@ -146,6 +187,28 @@ function redraw() {
     ctx.strokeRect(x, y, w, h);
     ctx.restore();
   }
+
+  renderTextsList();
+}
+
+function renderTextsList() {
+  detectedTextsList.innerHTML = "";
+  for (const box of state.boxes) {
+    const li = document.createElement("li");
+    if (!box.enabled) li.classList.add("disabled");
+
+    const idSpan = document.createElement("span");
+    idSpan.className = "text-id";
+    idSpan.textContent = box.id;
+
+    const textSpan = document.createElement("span");
+    textSpan.className = "text-content";
+    textSpan.textContent = box.text ? box.text : "(手動追加)";
+
+    li.appendChild(idSpan);
+    li.appendChild(textSpan);
+    detectedTextsList.appendChild(li);
+  }
 }
 
 function canvasPointFromEvent(evt) {
@@ -202,6 +265,7 @@ canvas.addEventListener("mouseup", (evt) => {
       w: Math.abs(end.x - dragStart.x),
       h: Math.abs(end.y - dragStart.y),
       enabled: true,
+      text: null,
     };
     state.boxes.push(box);
   }
@@ -260,7 +324,7 @@ fileInput.addEventListener("change", async (evt) => {
     }
     const data = await res.json();
 
-    state.boxes = data.texts.map((t) => ({ id: t.id, x: t.x, y: t.y, w: t.w, h: t.h, enabled: true }));
+    state.boxes = data.texts.map((t) => ({ id: t.id, x: t.x, y: t.y, w: t.w, h: t.h, enabled: true, text: t.text }));
     redraw();
     setStatus(`${state.boxes.length} 件の文字候補を検出しました。`);
   } catch (err) {

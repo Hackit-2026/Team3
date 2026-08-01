@@ -6,6 +6,8 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from paddleocr import PaddleOCR
 
+import llm_classifier
+
 app = FastAPI(title="Text Mosaic Detection API")
 
 app.add_middleware(
@@ -67,17 +69,6 @@ def is_sensitive_line(text: str) -> bool:
 # 模様やロゴのテクスチャを文字と誤検出した際にできる、数ピクセルのノイズ枠を除外する。
 MIN_BOX_SIZE_PX = 10
 
-# 看板などの巨大な文字枠を除外する閾値。画像全体に対する面積比で判定することで、
-# 画像の解像度が変わっても一定の基準で「大きすぎる枠」を弾けるようにする。
-# 当初は0.06（典型的な構図を想定した中間値）だったが、実写真での検証で
-# 密集した文字が結合されて大きな枠になったり（カレンダーの数字）、近距離で
-# 撮ったスライドの個人情報（メールアドレス等）自体が画面の大部分を占めたりして、
-# 本来隠すべき個人情報を誤って除外してしまうケースが複数見つかった。
-# 見逃し（個人情報の露出）は誤除外の逆（看板に一時的にモザイクがかかる）より
-# 深刻なため、画面のほとんどを1つの被写体が占めるような極端なケースだけを
-# 除外する0.25まで引き上げ、実質的な取りこぼしを最小化する方針にした。
-DEFAULT_MAX_AREA_RATIO = 0.25
-
 
 def detect_text_boxes(image: np.ndarray) -> list[dict]:
     results = ocr_engine.predict(image)
@@ -98,24 +89,10 @@ def detect_text_boxes(image: np.ndarray) -> list[dict]:
     return texts
 
 
-def expand_sensitive_lines(texts: list[dict], image_width: int) -> list[dict]:
-    # メール/電話/住所などと判定された行は、前後の文字も含めて隠せるよう
+def expand_to_full_line(texts: list[dict], image_width: int) -> list[dict]:
+    # モザイク対象と判定された行は、前後の文字も含めて隠せるよう
     # 検出された枠の幅に関わらず行全体（画像の横幅いっぱい）をモザイク対象にする。
-    expanded = []
-    for t in texts:
-        if is_sensitive_line(t["text"]):
-            expanded.append({**t, "x": 0, "w": image_width})
-        else:
-            expanded.append(t)
-    return expanded
-
-
-def filter_oversized_boxes(
-    texts: list[dict], image_width: int, image_height: int, max_area_ratio: float
-) -> list[dict]:
-    image_area = image_width * image_height
-    max_area = image_area * max_area_ratio
-    return [t for t in texts if t["w"] * t["h"] < max_area]
+    return [{**t, "x": 0, "w": image_width} for t in texts]
 
 
 def filter_tiny_boxes(texts: list[dict], min_size: int) -> list[dict]:
@@ -123,10 +100,7 @@ def filter_tiny_boxes(texts: list[dict], min_size: int) -> list[dict]:
 
 
 @app.post("/api/detect-text")
-async def detect_text(
-    file: UploadFile = File(...),
-    max_area_ratio: float = DEFAULT_MAX_AREA_RATIO,
-):
+async def detect_text(file: UploadFile = File(...)):
     data = await file.read()
     buffer = np.frombuffer(data, dtype=np.uint8)
     image = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
@@ -139,22 +113,35 @@ async def detect_text(
     texts = detect_text_boxes(image)
     texts = filter_tiny_boxes(texts, MIN_BOX_SIZE_PX)
 
-    # メール/電話/住所などの強いシグナルを含む行は、看板フィルターの対象外として
-    # 必ずモザイクをかける（面積フィルターより優先する）。
+    # 正規表現で強いシグナル（メール/電話/住所など）が取れた行は、LLMを呼ばずに
+    # 即座にモザイク確定させる（通信不要で確実、ローカルLLM未接続でも最低限の
+    # 保護を維持できる）。前後の文字も含めて隠せるよう行全体に幅を拡張する。
     sensitive = [t for t in texts if is_sensitive_line(t["text"])]
-    normal = [t for t in texts if not is_sensitive_line(t["text"])]
+    other = [t for t in texts if not is_sensitive_line(t["text"])]
+    sensitive = expand_to_full_line(sensitive, image_width)
 
-    normal = filter_oversized_boxes(normal, image_width, image_height, max_area_ratio)
-    sensitive = expand_sensitive_lines(sensitive, image_width)
+    # 残りは「一般に広く知られている公開情報だとLLMが確信した場合のみ隠さない」
+    # という発想の反転判定に委ねる。既定はモザイク対象とし、面積の大小では判定
+    # しない（看板のような大きな文字列でも、公開情報だと判定されなければ隠す）。
+    # LLM未接続・応答不能な場合は安全側（＝隠す）に倒れる。こちらは行全体には
+    # 拡張せず、検出された枠のまま隠す。
+    llm_flagged = [t for t in other if not llm_classifier.is_public_text(t["text"])]
 
-    texts = sensitive + normal
+    texts = sensitive + llm_flagged
 
     return {
         "status": "success",
         "image_width": image_width,
         "image_height": image_height,
         "texts": [
-            {"id": f"t_{i + 1:03d}", "x": t["x"], "y": t["y"], "w": t["w"], "h": t["h"]}
+            {
+                "id": f"t_{i + 1:03d}",
+                "x": t["x"],
+                "y": t["y"],
+                "w": t["w"],
+                "h": t["h"],
+                "text": t["text"],
+            }
             for i, t in enumerate(texts)
         ],
     }

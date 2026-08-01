@@ -17,3 +17,4 @@ backend/tune_*.jpg
 backend/annotated_*.jpg
 backend/crop_*.jpg
 backend/rec_debug.json
+backend/resp_debug.json

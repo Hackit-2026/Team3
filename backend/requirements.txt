@@ -5,3 +5,4 @@ paddlepaddle
 paddleocr
 opencv-python
 numpy
+requests
