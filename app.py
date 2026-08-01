@@ -1,6 +1,7 @@
 import io
 import os
-import cv2
+import math
+import urllib.request
 import numpy as np
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
@@ -10,17 +11,40 @@ import traceback
 # 1. ページ基本設定
 # -------------------------------------------------------------------
 st.set_page_config(
-    page_title="AI Smart Masking Pro", page_icon="🛡️", layout="wide"
+    page_title="AI Smart Masking Pro Ultra", page_icon="🛡️", layout="wide"
 )
 
-st.title("🛡️ AI Smart Masking Pro")
-st.caption("通信なし・完全オフライン動作。Tasks API ＋ 多層フォールバックエンジンによる超高精度モザイク処理。")
+st.title("🛡️ AI Smart Masking Pro Ultra")
+st.caption("通信なし・完全オフライン。Landmarker + Detector ハイブリッドエンジン ＆ 100分割超拡大スキャン搭載。")
 
 # -------------------------------------------------------------------
-# 2. モデルファイルのロード ＆ OpenCVカスケード準備
+# 2. モデルファイルの自動ダウンロード ＆ ロード
 # -------------------------------------------------------------------
 MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mp_models")
+os.makedirs(MODEL_DIR, exist_ok=True)
+
 FACE_LANDMARKER_PATH = os.path.join(MODEL_DIR, "face_landmarker.task")
+FACE_DETECTOR_PATH = os.path.join(MODEL_DIR, "blaze_face_short_range.tflite")
+
+# 必要モデルの自動ダウンロード処理
+MODEL_URLS = {
+    FACE_LANDMARKER_PATH: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+    FACE_DETECTOR_PATH: "https://storage.googleapis.com/mediapipe-models/face_detector/face_detector/float16/1/face_detector.tflite"
+}
+
+def ensure_models_exist():
+    for path, url in MODEL_URLS.items():
+        if not os.path.exists(path):
+            filename = os.path.basename(path)
+            with st.spinner(f"📦 必要なモデルファイル ({filename}) を初期ダウンロード中..."):
+                try:
+                    urllib.request.urlretrieve(url, path)
+                    st.success(f"✨ {filename} のダウンロードが完了しました！")
+                except Exception as e:
+                    st.error(f"❌ {filename} のダウンロードに失敗しました: {e}")
+                    st.stop()
+
+ensure_models_exist()
 
 @st.cache_resource
 def load_mediapipe_tasks():
@@ -29,29 +53,33 @@ def load_mediapipe_tasks():
         from mediapipe.tasks import python as mp_python
         from mediapipe.tasks.python import vision
         
-        landmarker = None
-        if os.path.exists(FACE_LANDMARKER_PATH):
-            base_options = mp_python.BaseOptions(model_asset_path=FACE_LANDMARKER_PATH)
-            options = vision.FaceLandmarkerOptions(
-                base_options=base_options,
-                running_mode=vision.RunningMode.IMAGE,
-                num_faces=150,
-                min_face_detection_confidence=0.05,
-                min_face_presence_confidence=0.05,
-                min_tracking_confidence=0.05,
-            )
-            landmarker = vision.FaceLandmarker.create_from_options(options)
+        # 精密ランドマーク用
+        base_options_lm = mp_python.BaseOptions(model_asset_path=FACE_LANDMARKER_PATH)
+        options_lm = vision.FaceLandmarkerOptions(
+            base_options=base_options_lm,
+            running_mode=vision.RunningMode.IMAGE,
+            num_faces=150,
+            min_face_detection_confidence=0.01,
+            min_face_presence_confidence=0.01,
+            min_tracking_confidence=0.01,
+        )
+        landmarker = vision.FaceLandmarker.create_from_options(options_lm)
         
-        # バックアップ用 OpenCV 顔検出カスケード
-        cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-        face_cascade = cv2.CascadeClassifier(cascade_path)
+        # 高感度検出用
+        base_options_det = mp_python.BaseOptions(model_asset_path=FACE_DETECTOR_PATH)
+        options_det = vision.FaceDetectorOptions(
+            base_options=base_options_det,
+            running_mode=vision.RunningMode.IMAGE,
+            min_detection_confidence=0.01,
+        )
+        detector = vision.FaceDetector.create_from_options(options_det)
 
-        return mp, landmarker, face_cascade
+        return mp, landmarker, detector
     except Exception as e:
         st.error(f"初期化エラー: {e}")
         return None, None, None
 
-mp, landmarker, face_cascade = load_mediapipe_tasks()
+mp, landmarker, detector = load_mediapipe_tasks()
 
 # セッション状態の初期化
 if "boxes" not in st.session_state:
@@ -75,32 +103,28 @@ precision_level = st.sidebar.radio(
         "普通（標準バランス）",
         "高精度（集合写真・少人数）",
         "超高精度（大人数・上限150人）",
-        "限界突破（スクランブル交差点・高密度150人）",
+        "限界突破・群衆（高密度・極小顔）",
     ],
     index=3,
-    help="「限界突破」はマルチレイヤースキャンと超解像処理を行い、交差点の極小顔まで漏らさず自動検出します。"
+    help="「限界突破」は100分割 ＆ 3倍超拡大ハイブリッドスキャンを行います。処理時間はかかりますが、最強の検知精度です。"
 )
 
 if precision_level == "普通（標準バランス）":
     grids = [1, 2]
-    scale_up_factor = 1.0
-    dup_thresh = 0.04
-    use_clahe = False
+    scale_up_factor = 1.2
+    dup_thresh = 0.45
 elif precision_level == "高精度（集合写真・少人数）":
     grids = [1, 2, 3]
-    scale_up_factor = 1.3
-    dup_thresh = 0.02
-    use_clahe = False
+    scale_up_factor = 1.5
+    dup_thresh = 0.40
 elif precision_level == "超高精度（大人数・上限150人）":
-    grids = [1, 2, 4, 5]
-    scale_up_factor = 1.8
-    dup_thresh = 0.012
-    use_clahe = True
+    grids = [1, 2, 4, 6]
+    scale_up_factor = 2.2
+    dup_thresh = 0.35
 else:  # 限界突破
-    grids = [1, 2, 4, 6, 8]
-    scale_up_factor = 2.5
-    dup_thresh = 0.005
-    use_clahe = True
+    grids = [1, 2, 4, 7, 10]
+    scale_up_factor = 3.0
+    dup_thresh = 0.30
 
 st.sidebar.markdown("---")
 
@@ -169,7 +193,7 @@ elif mask_type == "塗りつぶし（カラー指定）":
 
 
 # -------------------------------------------------------------------
-# 4. 画像処理ユーティリティ
+# 4. Pure Python / Pillow 画像処理ユーティリティ
 # -------------------------------------------------------------------
 def get_emoji_font(font_size: int):
     font_candidates = ["seguiemj.ttf", "NotoColorEmoji.ttf", "Apple Color Emoji.ttc", "arial.ttf"]
@@ -204,247 +228,230 @@ def create_cropped_emoji_image(emoji_char: str, target_size: int) -> Image.Image
     return cropped.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
 
-def apply_clahe(img_np):
-    try:
-        lab = cv2.cvtColor(img_np, cv2.COLOR_RGB2LAB)
-        l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-        cl = clahe.apply(l)
-        limg = cv2.merge((cl, a, b))
-        return cv2.cvtColor(limg, cv2.COLOR_LAB2RGB)
-    except Exception:
-        return img_np
+def get_polygon_hull_pil(pts):
+    if len(pts) < 3:
+        return [(int(p[0]), int(p[1])) for p in pts]
 
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
 
-def get_rotated_image_and_inv_matrix(image_np, angle):
-    if angle == 0:
-        return image_np, None
+    sorted_pts = sorted(pts, key=lambda p: (p[0], p[1]))
+    lower = []
+    for p in sorted_pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
 
-    h, w = image_np.shape[:2]
-    center = (w / 2.0, h / 2.0)
-    
-    M = cv2.getRotationMatrix2D(center, angle, 1.0)
-    cos = np.abs(M[0, 0])
-    sin = np.abs(M[0, 1])
-    new_w = int((h * sin) + (w * cos))
-    new_h = int((h * cos) + (w * sin))
-    
-    M[0, 2] += (new_w / 2.0) - center[0]
-    M[1, 2] += (new_h / 2.0) - center[1]
-    
-    rotated_img = cv2.warpAffine(image_np, M, (new_w, new_h))
-    M_inv = cv2.invertAffineTransform(M)
-    return rotated_img, M_inv
+    upper = []
+    for p in reversed(sorted_pts):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
 
+    hull = lower[:-1] + upper[:-1]
+    return [(int(p[0]), int(p[1])) for p in hull]
 
-def map_points_back(points, M_inv):
-    clean_pts = []
-    for p in points:
-        if len(p) >= 2:
-            try:
-                clean_pts.append((float(p[0]), float(p[1])))
-            except Exception:
-                pass
-
-    if len(clean_pts) == 0:
+def py_nms(items, iou_threshold):
+    if not items:
         return []
 
-    if M_inv is None:
-        return [(int(p[0]), int(p[1])) for p in clean_pts]
+    scores = np.array([item["score"] for item in items])
+    boxes = np.array([ [item["box"][0], item["box"][1], item["box"][0]+item["box"][2], item["box"][1]+item["box"][3]] for item in items ])
 
-    m00, m01, m02 = float(M_inv[0][0]), float(M_inv[0][1]), float(M_inv[0][2])
-    m10, m11, m12 = float(M_inv[1][0]), float(M_inv[1][1]), float(M_inv[1][2])
+    x1 = boxes[:, 0]
+    y1 = boxes[:, 1]
+    x2 = boxes[:, 2]
+    y2 = boxes[:, 3]
+    areas = (x2 - x1 + 1) * (y2 - y1 + 1)
 
-    res = []
-    for x, y in clean_pts:
-        x_orig = int(m00 * x + m01 * y + m02)
-        y_orig = int(m10 * x + m11 * y + m12)
-        res.append((x_orig, y_orig))
-    return res
+    order = scores.argsort()[::-1]
 
+    keep = []
+    while order.size > 0:
+        i = order[0]
+        keep.append(items[i])
 
-def get_polygon_from_pts(target_pts):
-    if not target_pts or len(target_pts) < 3:
-        return [(int(p[0]), int(p[1])) for p in target_pts]
-    try:
-        pts_np = np.array(target_pts, dtype=np.int32).reshape(-1, 2)
-        hull = cv2.convexHull(pts_np)
-        if hull is not None and len(hull) >= 3:
-            return [(int(pt[0]), int(pt[1])) for pt in hull.reshape(-1, 2)]
-    except Exception:
-        pass
-    return [(int(p[0]), int(p[1])) for p in target_pts]
+        if order.size == 1:
+            break
 
+        xx1 = np.maximum(x1[i], x1[order[1:]])
+        yy1 = np.maximum(y1[i], y1[order[1:]])
+        xx2 = np.minimum(x2[i], x2[order[1:]])
+        yy2 = np.minimum(y2[i], y2[order[1:]])
+
+        w = np.maximum(0.0, xx2 - xx1 + 1)
+        h = np.maximum(0.0, yy2 - yy1 + 1)
+        inter = w * h
+
+        iou = inter / (areas[i] + areas[order[1:]] - inter)
+
+        inds = np.where(iou <= iou_threshold)[0]
+        order = order[inds + 1]
+
+    return keep
 
 # -------------------------------------------------------------------
-# 5. マルチレイヤーハイブリッド検出スキャン
+# 5. ハイブリッド検出 ＆ 限界突破スキャンエンジン
 # -------------------------------------------------------------------
 def get_mask_boxes_locally(
     image: Image.Image,
     mask_targets: list,
     grids: list,
-    scale_factor: float = 2.0,
-    dup_thresh: float = 0.01,
-    apply_enhance: bool = False
+    scale_factor: float = 3.0,
+    dup_thresh: float = 0.30,
 ):
-    original_np = np.array(image)
-    processed_np = apply_clahe(original_np) if apply_enhance else original_np
-    orig_h, orig_w, _ = processed_np.shape
+    if landmarker is None or detector is None:
+        st.error("MediaPipeエンジンの初期化に失敗しています。")
+        return []
 
-    detected_items = []
-    processed_centers = []
+    orig_w, orig_h = image.size
+    all_raw_items = []
 
     INDEX_RIGHT_EYE = [33, 133, 160, 159, 158, 144, 145, 153]
     INDEX_LEFT_EYE = [362, 263, 387, 386, 385, 373, 374, 380]
     INDEX_NOSE = [1, 2, 98, 327, 278, 48]
     INDEX_MOUTH = [61, 291, 37, 267, 0, 17, 18, 14, 87, 317]
 
-    angles = [0, 15, -15]
+    crops = []
+    for g in grids:
+        if g == 1:
+            crops.append((0, 0, orig_w, orig_h))
+            continue
+        step_x = orig_w // g
+        step_y = orig_h // g
+        overlap_x = int(step_x * 0.45)
+        overlap_y = int(step_y * 0.45)
 
-    def is_duplicate(cx, cy):
-        for pcx, pcy in processed_centers:
-            if abs(pcx - cx) < dup_thresh and abs(pcy - cy) < dup_thresh:
-                return True
-        return False
+        for i in range(g):
+            for j in range(g):
+                x1 = max(0, i * step_x - overlap_x)
+                y1 = max(0, j * step_y - overlap_y)
+                x2 = min(orig_w, (i + 1) * step_x + overlap_x)
+                y2 = min(orig_h, (j + 1) * step_y + overlap_y)
+                crops.append((x1, y1, x2 - x1, y2 - y1))
 
-    for angle in angles:
-        rotated_np, M_inv = get_rotated_image_and_inv_matrix(processed_np, angle)
-        rot_h, rot_w, _ = rotated_np.shape
+    progress_bar = st.progress(0)
+    num_crops = len(crops)
 
-        crops = []
-        for g in grids:
-            if g == 1:
-                crops.append((0, 0, rot_w, rot_h))
-                continue
-            
-            step_x = rot_w // g
-            step_y = rot_h // g
-            overlap_x = int(step_x * 0.4) 
-            overlap_y = int(step_y * 0.4)
+    for idx, (cx_off, cy_off, cw, ch) in enumerate(crops):
+        progress_bar.progress(int((idx + 1) / num_crops * 100), text=f"画像を分割スキャン中... ({idx+1}/{num_crops})")
+        if cw < 10 or ch < 10: continue
 
-            for i in range(g):
-                for j in range(g):
-                    x1 = max(0, i * step_x - overlap_x)
-                    y1 = max(0, j * step_y - overlap_y)
-                    x2 = min(rot_w, (i + 1) * step_x + overlap_x)
-                    y2 = min(rot_h, (j + 1) * step_y + overlap_y)
-                    crops.append((x1, y1, x2 - x1, y2 - y1))
+        crop_pil = image.crop((cx_off, cy_off, cx_off + cw, cy_off + ch))
 
-        for cx_off, cy_off, cw, ch in crops:
-            crop_img = rotated_np[cy_off:cy_off+ch, cx_off:cx_off+cw]
-            if crop_img.shape[0] < 10 or crop_img.shape[1] < 10:
-                continue
+        if scale_factor > 1.0 and (cw * scale_factor < 6000 and ch * scale_factor < 6000):
+            scaled_crop = crop_pil.resize((int(cw * scale_factor), int(ch * scale_factor)), Image.Resampling.BICUBIC)
+            curr_scale = scale_factor
+        else:
+            scaled_crop = crop_pil
+            curr_scale = 1.0
 
-            if scale_factor > 1.0 and (cw * scale_factor < 5000 and ch * scale_factor < 5000):
-                scaled_crop = cv2.resize(
-                    crop_img, 
-                    (int(cw * scale_factor), int(ch * scale_factor)), 
-                    interpolation=cv2.INTER_CUBIC
-                )
-                curr_scale = scale_factor
-            else:
-                scaled_crop = crop_img
-                curr_scale = 1.0
+        crop_np = np.array(scaled_crop)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(crop_np))
 
-            # --- A. MediaPipe Tasks (FaceLandmarker) ---
-            if landmarker is not None:
-                try:
-                    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(scaled_crop))
-                    result_lm = landmarker.detect(mp_image)
-                    if result_lm and result_lm.face_landmarks:
-                        for face_landmarks in result_lm.face_landmarks:
-                            rot_pts_all = []
-                            for lm in face_landmarks:
-                                lx = getattr(lm, 'x', lm['x'] if isinstance(lm, dict) else 0)
-                                ly = getattr(lm, 'y', lm['y'] if isinstance(lm, dict) else 0)
-                                pt_x = cx_off + (lx * cw * curr_scale) / curr_scale
-                                pt_y = cy_off + (ly * ch * curr_scale) / curr_scale
-                                rot_pts_all.append((pt_x, pt_y))
-                            
-                            orig_pts_all = map_points_back(rot_pts_all, M_inv)
-                            if len(orig_pts_all) == 0:
-                                continue
+        # --- A. FaceDetector ---
+        try:
+            result_det = detector.detect(mp_image)
+            if result_det and result_det.detections:
+                for detection in result_det.detections:
+                    score = detection.categories[0].score
+                    bbox = detection.bounding_box
+                    real_x = cx_off + (bbox.origin_x / curr_scale)
+                    real_y = cy_off + (bbox.origin_y / curr_scale)
+                    real_w = bbox.width / curr_scale
+                    real_h = bbox.height / curr_scale
 
-                            abs_cx = sum(p[0] for p in orig_pts_all) / len(orig_pts_all) / orig_w
-                            abs_cy = sum(p[1] for p in orig_pts_all) / len(orig_pts_all) / orig_h
+                    if real_w < 3 or real_h < 3: continue
 
-                            if is_duplicate(abs_cx, abs_cy):
-                                continue
+                    center_pt = (real_x + real_w/2, real_y + real_h/2)
+                    axes = (max(1, int(real_w / 2 * 1.1)), max(1, int(real_h * 0.7)))
+                    num_pts = 20
+                    ellipse_pts = []
+                    for i in range(num_pts):
+                        angle = 2 * math.pi * i / num_pts
+                        ellipse_pts.append((center_pt[0] + axes[0]*math.cos(angle), center_pt[1] + axes[1]*math.sin(angle)))
 
-                            def process_target(indices, target_type):
-                                target_pts = [orig_pts_all[i] for i in indices if i < len(orig_pts_all)]
-                                if not target_pts:
-                                    return
-                                x_coords = [p[0] for p in target_pts]
-                                y_coords = [p[1] for p in target_pts]
-                                xmin, xmax = min(x_coords), max(x_coords)
-                                ymin, ymax = min(y_coords), max(y_coords)
+                    all_raw_items.append({
+                        "box": (real_x, real_y, real_w, real_h),
+                        "center": center_pt,
+                        "polygon": get_polygon_hull_pil(ellipse_pts),
+                        "score": score,
+                        "engine": "detector",
+                        "indices": None
+                    })
+        except: pass
 
-                                w_box, h_box = xmax - xmin, ymax - ymin
-                                if w_box < 2 or h_box < 2:
-                                    return
+        # --- B. FaceLandmarker ---
+        try:
+            result_lm = landmarker.detect(mp_image)
+            if result_lm and result_lm.face_landmarks:
+                for face_landmarks in result_lm.face_landmarks:
+                    score = sum([lm.presence for lm in face_landmarks]) / len(face_landmarks)
+                    
+                    orig_pts_all = []
+                    for lm in face_landmarks:
+                        lx = getattr(lm, 'x', lm['x'] if isinstance(lm, dict) else 0)
+                        ly = getattr(lm, 'y', lm['y'] if isinstance(lm, dict) else 0)
+                        orig_pts_all.append((cx_off + (lx * cw * curr_scale) / curr_scale, cy_off + (ly * ch * curr_scale) / curr_scale))
 
-                                polygon = get_polygon_from_pts(target_pts)
-                                processed_centers.append((abs_cx, abs_cy))
-                                detected_items.append({
-                                    "box": (xmin, ymin, w_box, h_box),
-                                    "polygon": polygon,
-                                    "type": target_type
-                                })
+                    if len(orig_pts_all) < 10: continue
 
-                            if "顔全体" in mask_targets:
-                                process_target(range(0, min(468, len(orig_pts_all))), "face")
-                            if "目元（両目）" in mask_targets:
-                                process_target(INDEX_RIGHT_EYE + INDEX_LEFT_EYE, "eyes")
-                            if "右目 (解剖学的)" in mask_targets:
-                                process_target(INDEX_RIGHT_EYE, "eye_r")
-                            if "左目 (解剖学的)" in mask_targets:
-                                process_target(INDEX_LEFT_EYE, "eye_l")
-                            if "鼻" in mask_targets:
-                                process_target(INDEX_NOSE, "nose")
-                            if "口元" in mask_targets:
-                                process_target(INDEX_MOUTH, "mouth")
-                except Exception:
-                    pass
+                    x_coords = [p[0] for p in orig_pts_all]
+                    y_coords = [p[1] for p in orig_pts_all]
+                    xmin, xmax = min(x_coords), max(x_coords)
+                    ymin, ymax = min(y_coords), max(y_coords)
+                    real_w, real_h = xmax - xmin, ymax - ymin
+                    if real_w < 3 or real_h < 3: continue
 
-            # --- B. OpenCV Cascade (遠距離・小顔補完エンジン) ---
-            if face_cascade is not None and not face_cascade.empty():
-                try:
-                    gray_crop = cv2.cvtColor(scaled_crop, cv2.COLOR_RGB2GRAY)
-                    faces = face_cascade.detectMultiScale(
-                        gray_crop,
-                        scaleFactor=1.08,
-                        minNeighbors=3,
-                        minSize=(8, 8)
-                    )
-                    for (fx, fy, fw, fh) in faces:
-                        orig_bx = cx_off + (fx / curr_scale)
-                        orig_by = cy_off + (fy / curr_scale)
-                        orig_bw = fw / curr_scale
-                        orig_bh = fh / curr_scale
+                    all_raw_items.append({
+                        "box": (xmin, ymin, real_w, real_h),
+                        "center": ((xmin+xmax)/2, (ymin+ymax)/2),
+                        "polygon": get_polygon_hull_pil(orig_pts_all),
+                        "score": score + 0.5,
+                        "engine": "landmarker",
+                        "indices": {
+                            "all": range(len(orig_pts_all)),
+                            "eyes": INDEX_RIGHT_EYE + INDEX_LEFT_EYE,
+                            "eye_r": INDEX_RIGHT_EYE,
+                            "eye_l": INDEX_LEFT_EYE,
+                            "nose": INDEX_NOSE,
+                            "mouth": INDEX_MOUTH
+                        }
+                    })
+        except: pass
 
-                        center_pt = (orig_bx + orig_bw / 2, orig_by + orig_bh / 2)
-                        abs_cx = center_pt[0] / orig_w
-                        abs_cy = center_pt[1] / orig_h
+    progress_bar.empty()
+    
+    if not all_raw_items:
+        return []
 
-                        if is_duplicate(abs_cx, abs_cy):
-                            continue
+    with st.spinner("検出結果を統合中..."):
+        kept_items = py_nms(all_raw_items, dup_thresh)
 
-                        axes = (max(1, int(orig_bw / 2)), max(1, int(orig_bh * 0.6)))
-                        ellipse_pts = cv2.ellipse2Poly((int(center_pt[0]), int(center_pt[1])), axes, 0, 0, 360, 15)
-                        orig_polygon = map_points_back(ellipse_pts, M_inv)
+    detected_items = []
+    for item in kept_items:
+        if item["indices"] is None:
+            if "顔全体" in mask_targets:
+                detected_items.append({"box": item["box"], "polygon": item["polygon"], "type": "face"})
+            continue
 
-                        processed_centers.append((abs_cx, abs_cy))
-                        detected_items.append({
-                            "box": (int(orig_bx), int(orig_by), int(orig_bw), int(orig_bh)),
-                            "polygon": orig_polygon,
-                            "type": "face"
-                        })
-                except Exception:
-                    pass
+        indices_map = item["indices"]
+        def process_target(indices_key, target_type):
+            target_pts = [ item["polygon"][i] for i in indices_map[indices_key] if i < len(item["polygon"]) ]
+            if not target_pts: return
+            x_coords = [p[0] for p in target_pts]
+            y_coords = [p[1] for p in target_pts]
+            w, h = max(x_coords)-min(x_coords), max(y_coords)-min(y_coords)
+            if w < 2 or h < 2: return
+            detected_items.append({"box": (min(x_coords), min(y_coords), w, h), "polygon": get_polygon_hull_pil(target_pts), "type": target_type})
 
-    if len(detected_items) > 150:
-        detected_items = detected_items[:150]
+        if "顔全体" in mask_targets:
+            detected_items.append({"box": item["box"], "polygon": item["polygon"], "type": "face"})
+        if "目元（両目）" in mask_targets: process_target("eyes", "eyes")
+        if "右目 (解剖学的)" in mask_targets: process_target("eye_r", "eye_r")
+        if "左目 (解剖学的)" in mask_targets: process_target("eye_l", "eye_l")
+        if "鼻" in mask_targets: process_target("nose", "nose")
+        if "口元" in mask_targets: process_target("mouth", "mouth")
 
     return detected_items
 
@@ -470,7 +477,6 @@ def apply_masking(
     result_img = image.copy().convert("RGB")
     img_w, img_h = image.size
 
-    # --- タイル状モザイクの場合 ---
     if mask_type == "タイル状モザイク (グリッド)":
         target_rects = [item["box"] for item in items]
         for gx in range(0, img_w, grid_size):
@@ -491,7 +497,6 @@ def apply_masking(
                     result_img.paste(mosaic_tile, (tile_l, tile_t))
         return result_img
 
-    # --- 通常マスキングスタイル ---
     for item in items:
         bx, by, bw, bh = item["box"]
         polygon = item["polygon"]
@@ -502,11 +507,9 @@ def apply_masking(
         bottom = max(0, min(img_h, int(by + bh)))
         box_w, box_h = right - left, bottom - top
 
-        if box_w <= 0 or box_h <= 0:
-            continue
+        if box_w <= 0 or box_h <= 0: continue
 
         cx, cy = left + box_w / 2, top + box_h / 2
-
         masked_box = result_img.crop((left, top, right, bottom))
 
         if mask_type == "ピクセルモザイク":
@@ -524,13 +527,11 @@ def apply_masking(
         elif mask_type == "絵文字スタンプ":
             target_size = max(int(max(box_w, box_h) * 0.9), min(int(max(box_w, box_h) * 1.15 * (emoji_scale / 100.0)), int(max(box_w, box_h) * 2.2)))
             emoji_img = create_cropped_emoji_image(emoji_char, target_size=target_size)
-            if emoji_angle != 0:
-                emoji_img = emoji_img.rotate(-emoji_angle, expand=True, resample=Image.Resampling.BICUBIC)
+            if emoji_angle != 0: emoji_img = emoji_img.rotate(-emoji_angle, expand=True, resample=Image.Resampling.BICUBIC)
             ew, eh = emoji_img.size
             result_img.paste(emoji_img, (int(cx - ew / 2 + offset_x), int(cy - eh / 2 + offset_y)), emoji_img)
             continue
 
-        # 合成処理
         if mask_shape == "顔の形（輪郭に沿う）" and polygon and len(polygon) >= 3:
             mask_crop = Image.new("L", (box_w, box_h), 0)
             draw_mask = ImageDraw.Draw(mask_crop)
@@ -560,12 +561,12 @@ if uploaded_file is not None:
 
     input_image = Image.open(uploaded_file).convert("RGB")
 
-    if st.button("🚀 ローカル AI で限界突破解析を開始", type="primary"):
+    if st.button("🚀 ローカル AI で解析を開始（限界突破モードは時間がかかります）", type="primary"):
         if not mask_targets:
             st.warning("⚠️ 「マスク対象」を少なくとも1つ選択してください。")
         else:
-            if precision_level == "限界突破（スクランブル交差点・高密度150人）":
-                st.info("⚠️ 【限界突破モード】 多層分割 ＋ OpenCV補完スキャンで全自動モザイク処理を行います。")
+            if precision_level == "限界突破・群衆（高密度・極小顔）":
+                st.info("⚠️ 【限界突破モード】 画像を100分割し、ハイブリッド超拡大スキャンを行います。しばらくお待ちください。")
             
             with st.spinner("AIがフル解析中..."):
                 try:
@@ -575,15 +576,15 @@ if uploaded_file is not None:
                         grids=grids,
                         scale_factor=scale_up_factor,
                         dup_thresh=dup_thresh,
-                        apply_enhance=use_clahe
                     )
                     st.session_state.confirmed = False
                     if not st.session_state.boxes:
-                        st.info("顔が検出されませんでした。別の画像をお試しください。")
+                        st.info("顔が検出されませんでした。精度モードを上げるか、別の画像をお試しください。")
                     else:
-                        st.success(f"解析成功！ 「{precision_level}」モードで {len(st.session_state.boxes)} 箇所の部位を検出しました。")
+                        st.success(f"解析成功！ 「{precision_level}」モードで {len(st.session_state.boxes)} 箇所の部位を検出し、重複を統合しました。")
                 except Exception as e:
-                    st.error(f"解析エラーが発生しました: {e}\n\n{traceback.format_exc()}")
+                    st.error(f"解析エラーが発生しました: {e}")
+                    st.text(traceback.format_exc())
 
     if st.session_state.boxes is not None:
         processed_image = apply_masking(
@@ -630,10 +631,10 @@ if uploaded_file is not None:
                 st.download_button(
                     label="💾 加工画像をダウンロード",
                     data=buf.getvalue(),
-                    file_name="crowd_masked.png",
+                    file_name="ultra_masked.png",
                     mime="image/png",
                     use_container_width=True,
                     type="primary",
                 )
 else:
-    st.info("👆 写真ファイルをアップロードして「🚀 ローカル AI で限界突破解析を開始」をクリックしてください。")
+    st.info("👆 写真ファイルをアップロードして「🚀 ローカル AI で解析を開始」をクリックしてください。")
