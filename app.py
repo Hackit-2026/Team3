@@ -12,7 +12,7 @@ st.set_page_config(
 )
 
 st.title("🛡️ 完全ローカル AI スマートマスキング WebApp")
-st.caption("通信なし・完全オフライン動作。全自動AIスキャンで顔・目・パーツを精密検出します。")
+st.caption("通信なし・完全オフライン動作。大人数の集合写真から極小の顔まで、全自動スキャンで精密検出します。")
 
 
 # --- MediaPipe モジュールの安全ロード ---
@@ -53,32 +53,51 @@ precision_level = st.sidebar.radio(
     "精度モードを選択",
     [
         "普通（標準バランス）",
-        "高精度（集合写真・誤爆防止）",
-        "超高精度（極小・斜め顔特化）",
+        "高精度（集合写真・少人数）",
+        "超高精度（大人数・密集写真）",
+        "限界突破（スクランブル交差点・極限群衆）",
     ],
-    index=1,
-    help="「高精度」は背景の誤爆を防ぎつつ集合写真を正確に検出します。"
+    index=3, # デフォルトを限界突破に設定
+    help="「限界突破」は50%オーバーラップの多層ピラミッドスキャンを行い、極小顔を極限まで検出します。処理に数分かかる場合があります。"
 )
 
-# モードごとのパラメータ設計
+# モードごとのパラメータ設計（限界突破モードの強化）
 if precision_level == "普通（標準バランス）":
     scan_mode_key = "標準"
-    max_grid_count = 2
-    scale_up_factor = 1.2
+    grid_levels = [1, 2]
+    scale_up_factor = 1.0
     conf_threshold = 0.35
     min_face_size = 15
-elif precision_level == "高精度（集合写真・誤爆防止）":
+    dup_thresh = 0.04
+    max_faces_limit = 20
+    use_clahe = False
+elif precision_level == "高精度（集合写真・少人数）":
     scan_mode_key = "高精度"
-    max_grid_count = 3
-    scale_up_factor = 1.4
+    grid_levels = [1, 2, 3]
+    scale_up_factor = 1.2
     conf_threshold = 0.35
     min_face_size = 12
-else:  # 超高精度
+    dup_thresh = 0.02
+    max_faces_limit = 50
+    use_clahe = False
+elif precision_level == "超高精度（大人数・密集写真）":
     scan_mode_key = "超高精度"
-    max_grid_count = 4
+    grid_levels = [1, 2, 4, 5]
     scale_up_factor = 1.8
-    conf_threshold = 0.30
+    conf_threshold = 0.25
     min_face_size = 8
+    dup_thresh = 0.012
+    max_faces_limit = 150
+    use_clahe = True
+else:  # 限界突破 (スクランブル交差点・極限群衆)
+    scan_mode_key = "群衆特化"
+    grid_levels = [1, 2, 4, 6, 8] # 最大8x8(64分割)まで多層スキャン
+    scale_up_factor = 2.5         # 2.5倍まで超拡大
+    conf_threshold = 0.15         # 確信度を限界まで下げる
+    min_face_size = 2             # 2ピクセルのノイズスレスレの顔まで許可
+    dup_thresh = 0.005            # 肩が触れ合う顔も別人と判定 (0.5%距離)
+    max_faces_limit = 300         # 1ブロック300人許可
+    use_clahe = True              # コントラスト強制強調ON
 
 st.sidebar.markdown("---")
 
@@ -147,7 +166,7 @@ elif mask_type == "塗りつぶし（カラー指定）":
 
 
 # -------------------------------------------------------------------
-# 3. 100%安全な幾何・座標変換処理（行列エラー修正済み）
+# 3. 安全な幾何・画像処理ユーティリティ
 # -------------------------------------------------------------------
 def get_emoji_font(font_size: int):
     font_candidates = ["seguiemj.ttf", "NotoColorEmoji.ttf", "Apple Color Emoji.ttc", "arial.ttf"]
@@ -182,6 +201,19 @@ def create_cropped_emoji_image(emoji_char: str, target_size: int) -> Image.Image
     return cropped.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
 
+def apply_clahe(img_np):
+    """暗部や輪郭をくっきり強調しAIの視力を上げるCLAHE前処理"""
+    try:
+        lab = cv2.cvtColor(img_np, cv2.COLOR_RGB2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)) # コントラスト強め
+        cl = clahe.apply(l)
+        limg = cv2.merge((cl, a, b))
+        return cv2.cvtColor(limg, cv2.COLOR_LAB2RGB)
+    except Exception:
+        return img_np
+
+
 def get_rotated_image_and_inv_matrix(image_np, angle):
     """回転画像と逆変換行列を生成"""
     if angle == 0:
@@ -201,23 +233,29 @@ def get_rotated_image_and_inv_matrix(image_np, angle):
     
     rotated_img = cv2.warpAffine(image_np, M, (new_w, new_h))
     
-    # 修正: OpenCVのinvertAffineTransformは1つの値（2x3行列）を返すため正しく受け取る
+    # 配列割れを防ぐためそのまま受け取る
     M_inv = cv2.invertAffineTransform(M)
-    
     return rotated_img, M_inv
 
 
 def map_points_back(points, M_inv):
-    """どのような型のデータが入ってきても型安全に(x, y)タプルリストへ変換してアフィン逆変換"""
+    """純粋な四則演算による完全エラーフリーな座標逆変換"""
     clean_pts = []
+    
     if isinstance(points, np.ndarray):
-        pts_2d = points.reshape(-1, 2)
-        for p in pts_2d:
-            clean_pts.append((float(p[0]), float(p[1])))
+        try:
+            pts_2d = points.reshape(-1, 2)
+            for p in pts_2d:
+                clean_pts.append((float(p[0]), float(p[1])))
+        except Exception:
+            pass 
     else:
         for p in points:
             if isinstance(p, (tuple, list, np.ndarray)) and len(p) >= 2:
-                clean_pts.append((float(p[0]), float(p[1])))
+                try:
+                    clean_pts.append((float(p[0]), float(p[1])))
+                except Exception:
+                    pass
 
     if len(clean_pts) == 0:
         return []
@@ -225,23 +263,22 @@ def map_points_back(points, M_inv):
     if M_inv is None:
         return [(int(p[0]), int(p[1])) for p in clean_pts]
 
-    # 行列（2次元配列）から安全に値を取得
-    m00, m01, m02 = float(M_inv[0, 0]), float(M_inv[0, 1]), float(M_inv[0, 2])
-    m10, m11, m12 = float(M_inv[1, 0]), float(M_inv[1, 1]), float(M_inv[1, 2])
+    # インデックスエラーを防ぐ手動展開
+    m00, m01, m02 = float(M_inv[0][0]), float(M_inv[0][1]), float(M_inv[0][2])
+    m10, m11, m12 = float(M_inv[1][0]), float(M_inv[1][1]), float(M_inv[1][2])
 
     res = []
     for x, y in clean_pts:
         x_orig = int(m00 * x + m01 * y + m02)
         y_orig = int(m10 * x + m11 * y + m12)
         res.append((x_orig, y_orig))
+        
     return res
 
 
 def get_polygon_from_pts(target_pts):
     """ConvexHullを安全に計算"""
-    if not target_pts:
-        return []
-    if len(target_pts) < 3:
+    if not target_pts or len(target_pts) < 3:
         return [(int(p[0]), int(p[1])) for p in target_pts]
 
     try:
@@ -249,9 +286,12 @@ def get_polygon_from_pts(target_pts):
         hull = cv2.convexHull(pts_np)
         polygon = []
         if hull is not None:
-            hull_flat = hull.reshape(-1, 2)
-            for pt in hull_flat:
-                polygon.append((int(pt[0]), int(pt[1])))
+            try:
+                hull_flat = hull.reshape(-1, 2)
+                for pt in hull_flat:
+                    polygon.append((int(pt[0]), int(pt[1])))
+            except Exception:
+                polygon = [(int(p[0]), int(p[1])) for p in target_pts]
         if not polygon:
             polygon = [(int(p[0]), int(p[1])) for p in target_pts]
         return polygon
@@ -260,23 +300,33 @@ def get_polygon_from_pts(target_pts):
 
 
 # -------------------------------------------------------------------
-# 4. マルチスキャン検出エンジン
+# 4. マルチスキャン検出エンジン (限界突破ハイパーピラミッド)
 # -------------------------------------------------------------------
 def get_mask_boxes_locally(
     image: Image.Image,
     mask_targets: list,
     scan_key: str,
-    max_grid: int = 3,
+    grids: list,
     scale_factor: float = 1.4,
     conf_thresh: float = 0.35,
-    min_size: int = 12
+    min_size: int = 12,
+    dup_thresh: float = 0.02,
+    max_faces: int = 50,
+    apply_enhance: bool = False
 ):
     if mp_face_mesh is None or mp_face_detection is None:
         st.error("MediaPipeが正常に読み込まれていません。")
         return []
 
     original_np = np.array(image)
-    orig_h, orig_w, _ = original_np.shape
+    
+    # コントラスト強調フィルター
+    if apply_enhance:
+        processed_np = apply_clahe(original_np)
+    else:
+        processed_np = original_np
+
+    orig_h, orig_w, _ = processed_np.shape
     detected_items = []
     processed_centers = []
 
@@ -285,31 +335,37 @@ def get_mask_boxes_locally(
     INDEX_NOSE = [1, 2, 98, 327, 278, 48]
     INDEX_MOUTH = [61, 291, 37, 267, 0, 17, 18, 14, 87, 317]
 
-    # 服のシワなどの誤爆を防ぐ自然な角度制限
-    if scan_key == "超高精度":
-        angles = [0, 15, -15, 30, -30, 45, -45]
-    elif scan_key == "高精度":
-        angles = [0, 20, -20]
+    # 回転の設定
+    if scan_key == "群衆特化":
+        angles = [0, 15, -15, 30, -30] # 複雑な角度に対応
+    elif scan_key == "超高精度":
+        angles = [0, 15, -15]
     else:
         angles = [0]
 
     def is_duplicate(cx, cy):
         for pcx, pcy in processed_centers:
-            if abs(pcx - cx) < 0.04 and abs(pcy - cy) < 0.04:
+            if abs(pcx - cx) < dup_thresh and abs(pcy - cy) < dup_thresh:
                 return True
         return False
 
     for angle in angles:
-        rotated_np, M_inv = get_rotated_image_and_inv_matrix(original_np, angle)
+        rotated_np, M_inv = get_rotated_image_and_inv_matrix(processed_np, angle)
         rot_h, rot_w, _ = rotated_np.shape
 
-        crops = [(0, 0, rot_w, rot_h)]
-
-        for g in range(2, max_grid + 1):
+        crops = []
+        
+        # ハイパーピラミッド・クロップ（多層階層・50%オーバーラップ）
+        for g in grids:
+            if g == 1:
+                crops.append((0, 0, rot_w, rot_h))
+                continue
+            
             step_x = rot_w // g
             step_y = rot_h // g
-            overlap_x = int(step_x * 0.3)
-            overlap_y = int(step_y * 0.3)
+            # 50%オーバーラップで「分割線の間に落ちる顔」を完全に無くす
+            overlap_x = int(step_x * 0.5) 
+            overlap_y = int(step_y * 0.5)
 
             for i in range(g):
                 for j in range(g):
@@ -322,21 +378,21 @@ def get_mask_boxes_locally(
         # --- 1. FaceMesh 精密検出 ---
         with mp_face_mesh.FaceMesh(
             static_image_mode=True,
-            max_num_faces=10,
+            max_num_faces=max_faces,  
             refine_landmarks=True,
             min_detection_confidence=conf_thresh,
         ) as face_mesh:
 
             for cx_off, cy_off, cw, ch in crops:
                 crop_img = rotated_np[cy_off:cy_off+ch, cx_off:cx_off+cw]
-                if crop_img.shape[0] < 20 or crop_img.shape[1] < 20:
+                if crop_img.shape[0] < 15 or crop_img.shape[1] < 15:
                     continue
 
-                if scale_factor > 1.0 and (cw * scale_factor < 3500 and ch * scale_factor < 3500):
+                if scale_factor > 1.0 and (cw * scale_factor < 4000 and ch * scale_factor < 4000):
                     scaled_crop = cv2.resize(
                         crop_img, 
                         (int(cw * scale_factor), int(ch * scale_factor)), 
-                        interpolation=cv2.INTER_LINEAR
+                        interpolation=cv2.INTER_CUBIC # キュービック補間で画質維持
                     )
                     curr_scale = scale_factor
                 else:
@@ -360,6 +416,7 @@ def get_mask_boxes_locally(
                         if len(orig_pts_all) == 0:
                             continue
 
+                        # 中心座標
                         abs_cx = sum(p[0] for p in orig_pts_all) / len(orig_pts_all) / orig_w
                         abs_cy = sum(p[1] for p in orig_pts_all) / len(orig_pts_all) / orig_h
 
@@ -376,8 +433,15 @@ def get_mask_boxes_locally(
                             ymin, ymax = min(y_coords), max(y_coords)
 
                             w_box, h_box = xmax - xmin, ymax - ymin
+                            
                             if w_box < min_size or h_box < min_size:
                                 return
+                            
+                            # 極細長い影などの誤検知を除外
+                            if w_box > 0 and h_box > 0:
+                                aspectRatio = w_box / h_box
+                                if aspectRatio > 3.0 or aspectRatio < 0.3:
+                                    return 
 
                             polygon = get_polygon_from_pts(target_pts)
 
@@ -409,14 +473,14 @@ def get_mask_boxes_locally(
 
             for cx_off, cy_off, cw, ch in crops:
                 crop_img = rotated_np[cy_off:cy_off+ch, cx_off:cx_off+cw]
-                if crop_img.shape[0] < 20 or crop_img.shape[1] < 20:
+                if crop_img.shape[0] < 15 or crop_img.shape[1] < 15:
                     continue
 
-                if scale_factor > 1.0 and (cw * scale_factor < 3500 and ch * scale_factor < 3500):
+                if scale_factor > 1.0 and (cw * scale_factor < 4000 and ch * scale_factor < 4000):
                     scaled_crop = cv2.resize(
                         crop_img, 
                         (int(cw * scale_factor), int(ch * scale_factor)), 
-                        interpolation=cv2.INTER_LINEAR
+                        interpolation=cv2.INTER_CUBIC
                     )
                     curr_scale = scale_factor
                 else:
@@ -439,8 +503,8 @@ def get_mask_boxes_locally(
                         axes = (max(1, int(rw // 2)), max(1, int(rh * 0.6)))
                         ellipse_pts = cv2.ellipse2Poly((int(center_pt[0]), int(center_pt[1])), axes, 0, 0, 360, 15)
                         
-                        pts_list = [(float(p[0]), float(p[1])) for p in ellipse_pts]
-                        orig_polygon = map_points_back(pts_list, M_inv)
+                        # 安全変換
+                        orig_polygon = map_points_back(ellipse_pts, M_inv)
                         if len(orig_polygon) == 0:
                             continue
                         
@@ -563,7 +627,7 @@ def apply_masking(
 # 6. メイン画面レイアウト
 # -------------------------------------------------------------------
 uploaded_file = st.file_uploader(
-    "画像をアップロードしてください (JPEG, PNG, WEBP, BMP)",
+    "群衆・交差点の写真をアップロードしてください (JPEG, PNG, WEBP, BMP)",
     type=["jpg", "jpeg", "png", "webp", "bmp"],
 )
 
@@ -576,20 +640,27 @@ if uploaded_file is not None:
 
     input_image = Image.open(uploaded_file).convert("RGB")
 
-    if st.button("🚀 ローカル AI で解析を実行", type="primary"):
+    if st.button("🚀 ローカル AI で限界突破解析を開始", type="primary"):
         if not mask_targets:
             st.warning("⚠️ 「マスク対象」を少なくとも1つ選択してください。")
         else:
-            with st.spinner("AIが指定された精度モードで画像を解析中..."):
+            # 処理時間に関する警告を出す
+            if precision_level == "限界突破（スクランブル交差点・極限群衆）":
+                st.info("⚠️ 【限界突破モード】 画像を最大64分割し、50%重ね合わせながら超拡大ピラミッドスキャンを行います。完了まで数分かかる場合があります。")
+            
+            with st.spinner("AIが指定された精度モードで画像をフル解析中..."):
                 try:
                     st.session_state.boxes = get_mask_boxes_locally(
                         input_image,
                         mask_targets,
                         scan_key=scan_mode_key,
-                        max_grid=max_grid_count,
+                        grids=grid_levels,
                         scale_factor=scale_up_factor,
                         conf_thresh=conf_threshold,
-                        min_size=min_face_size
+                        min_size=min_face_size,
+                        dup_thresh=dup_thresh,
+                        max_faces=max_faces_limit,
+                        apply_enhance=use_clahe
                     )
                     st.session_state.confirmed = False
                     if not st.session_state.boxes:
@@ -597,7 +668,8 @@ if uploaded_file is not None:
                     else:
                         st.success(f"解析成功！ 「{precision_level}」モードで {len(st.session_state.boxes)} 箇所の部位を検出しました。")
                 except Exception as e:
-                    st.error(f"解析エラー: {e}")
+                    import traceback
+                    st.error(f"解析エラーが発生しました: {e}\n\n{traceback.format_exc()}")
 
     if st.session_state.boxes is not None:
         processed_image = apply_masking(
@@ -619,10 +691,10 @@ if uploaded_file is not None:
         st.markdown("---")
         col_left, col_right = st.columns(2)
         with col_left:
-            st.subheader("📷 元の画像 (比較用)")
+            st.subheader("📷 元の画像")
             st.image(input_image, use_container_width=True)
         with col_right:
-            st.subheader("🎉 確定した画像" if st.session_state.confirmed else "🔍 リアルタイム調整プレビュー")
+            st.subheader("🔍 マスキング結果")
             st.image(processed_image, use_container_width=True)
 
         st.markdown("---")
@@ -642,12 +714,12 @@ if uploaded_file is not None:
                 buf = io.BytesIO()
                 processed_image.save(buf, format="PNG")
                 st.download_button(
-                    label="💾 確定画像を保存 (ダウンロード)",
+                    label="💾 加工画像をダウンロード",
                     data=buf.getvalue(),
-                    file_name="masked_image.png",
+                    file_name="crowd_masked.png",
                     mime="image/png",
                     use_container_width=True,
                     type="primary",
                 )
 else:
-    st.info("👆 画像ファイルをアップロードして「🚀 ローカル AI で解析を実行」ボタンを押してください。")
+    st.info("👆 写真ファイルをアップロードして「🚀 ローカル AI で限界突破解析を開始」をクリックしてください。")
