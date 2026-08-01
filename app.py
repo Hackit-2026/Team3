@@ -1,4 +1,6 @@
 import io
+import os
+import urllib.request
 import cv2
 import numpy as np
 import streamlit as st
@@ -13,37 +15,63 @@ st.set_page_config(
 )
 
 st.title("🛡️ 完全ローカル AI スマートマスキング WebApp")
-st.caption("通信なし・完全オフライン動作。詳細エラー診断機能付き。")
+st.caption("完全オフライン動作（初回起動時のみモデルファイルのダウンロードに通信が必要です）。詳細エラー診断機能付き。")
 
 
-# --- MediaPipe モジュールの詳細診断ロード ---
+# -------------------------------------------------------------------
+# MediaPipe Tasks API（新API）モデルの準備＆ロード
+# -------------------------------------------------------------------
+MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mp_models")
+
+FACE_LANDMARKER_URL = (
+    "https://storage.googleapis.com/mediapipe-models/"
+    "face_landmarker/face_landmarker/float16/latest/face_landmarker.task"
+)
+# 遠距離・群衆向けの full_range モデル（旧 model_selection=1 相当）
+FACE_DETECTOR_URL = (
+    "https://storage.googleapis.com/mediapipe-models/"
+    "face_detector/blaze_face_full_range/float16/1/blaze_face_full_range.tflite"
+)
+
+FACE_LANDMARKER_PATH = os.path.join(MODEL_DIR, "face_landmarker.task")
+FACE_DETECTOR_PATH = os.path.join(MODEL_DIR, "blaze_face_full_range.tflite")
+
+
+def _ensure_model(url: str, dest_path: str):
+    """モデルファイルが無ければダウンロードする（初回のみ通信発生）。"""
+    if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
+        return
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    urllib.request.urlretrieve(url, dest_path)
+
+
 @st.cache_resource
 def load_mediapipe_models():
+    """
+    MediaPipe 1.x 系では mp.solutions.face_mesh / face_detection の
+    レガシー Solutions API が廃止されているため、新しい Tasks API
+    （FaceLandmarker / FaceDetector）を使用する。
+    Tasks API はモデルをパッケージに同梱していないため、
+    .task / .tflite モデルファイルをローカルにキャッシュしてから利用する。
+    """
     try:
         import mediapipe as mp
-        
-        # フォルダ内での誤った同名ファイル作成チェック
-        if __file__ == "cv2.py" or __file__ == "mediapipe.py":
-            st.error("⚠️ 致命的なエラー: フォルダ内に 'cv2.py' または 'mediapipe.py' という名前のファイルが存在します。別の名前に変更してください。")
-            return None, None
+        from mediapipe.tasks import python as mp_python
+        from mediapipe.tasks.python import vision
 
-        # solutions のロード試行
-        if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_mesh"):
-            return mp.solutions.face_mesh, mp.solutions.face_detection
-        else:
-            # 代替インポート
-            import mediapipe.python.solutions.face_mesh as mp_fm
-            import mediapipe.python.solutions.face_detection as mp_fd
-            return mp_fm, mp_fd
-            
-    except Exception as e:
-        # 画面上に具体的なエラー原因を表示する
+        with st.spinner("初回起動中：AIモデルファイルを準備しています..."):
+            _ensure_model(FACE_LANDMARKER_URL, FACE_LANDMARKER_PATH)
+            _ensure_model(FACE_DETECTOR_URL, FACE_DETECTOR_PATH)
+
+        return mp, mp_python, vision
+
+    except Exception:
         error_detail = traceback.format_exc()
         st.error(f"❌ MediaPipeの読み込みに失敗しました。\n\n**詳細エラー:**\n```text\n{error_detail}\n```")
-        return None, None
+        return None, None, None
 
 
-mp_face_mesh, mp_face_detection = load_mediapipe_models()
+mp, mp_python, mp_vision = load_mediapipe_models()
 
 # セッション状態の初期化
 if "boxes" not in st.session_state:
@@ -57,7 +85,7 @@ if "file_id" not in st.session_state:
 # 2. サイドバー設定
 # -------------------------------------------------------------------
 st.sidebar.header("⚙️ マスク設定")
-st.sidebar.success("🔒 完全ローカルモード (Wi-FiオフOK)")
+st.sidebar.success("🔒 完全ローカルモード (モデル取得後はWi-FiオフでもOK)")
 
 # 🎯 検出精度モード
 st.sidebar.subheader("🔍 検出精度")
@@ -231,16 +259,16 @@ def get_rotated_image_and_inv_matrix(image_np, angle):
 
     h, w = image_np.shape[:2]
     center = (w / 2.0, h / 2.0)
-    
+
     M = cv2.getRotationMatrix2D(center, angle, 1.0)
     cos = np.abs(M[0, 0])
     sin = np.abs(M[0, 1])
     new_w = int((h * sin) + (w * cos))
     new_h = int((h * cos) + (w * sin))
-    
+
     M[0, 2] += (new_w / 2.0) - center[0]
     M[1, 2] += (new_h / 2.0) - center[1]
-    
+
     rotated_img = cv2.warpAffine(image_np, M, (new_w, new_h))
     M_inv = cv2.invertAffineTransform(M)
     return rotated_img, M_inv
@@ -254,7 +282,7 @@ def map_points_back(points, M_inv):
             for p in pts_2d:
                 clean_pts.append((float(p[0]), float(p[1])))
         except Exception:
-            pass 
+            pass
     else:
         for p in points:
             if isinstance(p, (tuple, list, np.ndarray)) and len(p) >= 2:
@@ -281,7 +309,7 @@ def map_points_back(points, M_inv):
         x_orig = int(m00 * x + m01 * y + m02)
         y_orig = int(m10 * x + m11 * y + m12)
         res.append((x_orig, y_orig))
-        
+
     return res
 
 
@@ -308,7 +336,7 @@ def get_polygon_from_pts(target_pts):
 
 
 # -------------------------------------------------------------------
-# 4. マルチスキャン検出エンジン
+# 4. マルチスキャン検出エンジン（MediaPipe Tasks API 版）
 # -------------------------------------------------------------------
 def get_mask_boxes_locally(
     image: Image.Image,
@@ -322,7 +350,7 @@ def get_mask_boxes_locally(
     max_faces: int = 50,
     apply_enhance: bool = False
 ):
-    if mp_face_mesh is None or mp_face_detection is None:
+    if mp is None or mp_python is None or mp_vision is None:
         st.error("MediaPipeが正常に読み込まれていません。")
         return []
 
@@ -351,47 +379,69 @@ def get_mask_boxes_locally(
                 return True
         return False
 
-    for angle in angles:
-        rotated_np, M_inv = get_rotated_image_and_inv_matrix(processed_np, angle)
-        rot_h, rot_w, _ = rotated_np.shape
+    # --- Tasks API: FaceLandmarker / FaceDetector を一度だけ生成して使い回す ---
+    landmarker = None
+    face_detector = None
+    try:
+        landmarker_options = mp_vision.FaceLandmarkerOptions(
+            base_options=mp_python.BaseOptions(model_asset_path=FACE_LANDMARKER_PATH),
+            running_mode=mp_vision.RunningMode.IMAGE,
+            num_faces=max_faces,
+            min_face_detection_confidence=conf_thresh,
+            min_face_presence_confidence=conf_thresh,
+            min_tracking_confidence=conf_thresh,
+            output_face_blendshapes=False,
+            output_facial_transformation_matrixes=False,
+        )
+        landmarker = mp_vision.FaceLandmarker.create_from_options(landmarker_options)
+    except Exception:
+        landmarker = None
 
-        crops = []
-        for g in grids:
-            if g == 1:
-                crops.append((0, 0, rot_w, rot_h))
-                continue
-            
-            step_x = rot_w // g
-            step_y = rot_h // g
-            overlap_x = int(step_x * 0.5) 
-            overlap_y = int(step_y * 0.5)
+    try:
+        detector_options = mp_vision.FaceDetectorOptions(
+            base_options=mp_python.BaseOptions(model_asset_path=FACE_DETECTOR_PATH),
+            running_mode=mp_vision.RunningMode.IMAGE,
+            min_detection_confidence=conf_thresh,
+        )
+        face_detector = mp_vision.FaceDetector.create_from_options(detector_options)
+    except Exception:
+        face_detector = None
 
-            for i in range(g):
-                for j in range(g):
-                    x1 = max(0, i * step_x - overlap_x)
-                    y1 = max(0, j * step_y - overlap_y)
-                    x2 = min(rot_w, (i + 1) * step_x + overlap_x)
-                    y2 = min(rot_h, (j + 1) * step_y + overlap_y)
-                    crops.append((x1, y1, x2 - x1, y2 - y1))
+    try:
+        for angle in angles:
+            rotated_np, M_inv = get_rotated_image_and_inv_matrix(processed_np, angle)
+            rot_h, rot_w, _ = rotated_np.shape
 
-        # --- 1. FaceMesh 精密検出 ---
-        try:
-            with mp_face_mesh.FaceMesh(
-                static_image_mode=True,
-                max_num_faces=max_faces,  
-                refine_landmarks=True,
-                min_detection_confidence=conf_thresh,
-            ) as face_mesh:
+            crops = []
+            for g in grids:
+                if g == 1:
+                    crops.append((0, 0, rot_w, rot_h))
+                    continue
 
+                step_x = rot_w // g
+                step_y = rot_h // g
+                overlap_x = int(step_x * 0.5)
+                overlap_y = int(step_y * 0.5)
+
+                for i in range(g):
+                    for j in range(g):
+                        x1 = max(0, i * step_x - overlap_x)
+                        y1 = max(0, j * step_y - overlap_y)
+                        x2 = min(rot_w, (i + 1) * step_x + overlap_x)
+                        y2 = min(rot_h, (j + 1) * step_y + overlap_y)
+                        crops.append((x1, y1, x2 - x1, y2 - y1))
+
+            # --- 1. FaceLandmarker 精密検出 ---
+            if landmarker is not None:
                 for cx_off, cy_off, cw, ch in crops:
-                    crop_img = rotated_np[cy_off:cy_off+ch, cx_off:cx_off+cw]
+                    crop_img = rotated_np[cy_off:cy_off + ch, cx_off:cx_off + cw]
                     if crop_img.shape[0] < 15 or crop_img.shape[1] < 15:
                         continue
 
                     if scale_factor > 1.0 and (cw * scale_factor < 4000 and ch * scale_factor < 4000):
                         scaled_crop = cv2.resize(
-                            crop_img, 
-                            (int(cw * scale_factor), int(ch * scale_factor)), 
+                            crop_img,
+                            (int(cw * scale_factor), int(ch * scale_factor)),
                             interpolation=cv2.INTER_CUBIC
                         )
                         curr_scale = scale_factor
@@ -399,19 +449,21 @@ def get_mask_boxes_locally(
                         scaled_crop = crop_img
                         curr_scale = 1.0
 
-                    results = face_mesh.process(scaled_crop)
-                    if results and results.multi_face_landmarks:
-                        for face_landmarks in results.multi_face_landmarks:
-                            landmarks = face_landmarks.landmark
-                            
+                    scaled_crop = np.ascontiguousarray(scaled_crop)
+
+                    try:
+                        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=scaled_crop)
+                        results = landmarker.detect(mp_image)
+                    except Exception:
+                        continue
+
+                    if results and results.face_landmarks:
+                        for landmarks in results.face_landmarks:
                             rot_pts_all = [
-                                (
-                                    cx_off + (lm.x * cw * curr_scale) / curr_scale, 
-                                    cy_off + (lm.y * ch * curr_scale) / curr_scale
-                                ) 
+                                (cx_off + lm.x * cw, cy_off + lm.y * ch)
                                 for lm in landmarks
                             ]
-                            
+
                             orig_pts_all = map_points_back(rot_pts_all, M_inv)
                             if len(orig_pts_all) == 0:
                                 continue
@@ -434,11 +486,11 @@ def get_mask_boxes_locally(
                                 w_box, h_box = xmax - xmin, ymax - ymin
                                 if w_box < min_size or h_box < min_size:
                                     return
-                                
+
                                 if w_box > 0 and h_box > 0:
                                     aspectRatio = w_box / h_box
                                     if aspectRatio > 3.0 or aspectRatio < 0.3:
-                                        return 
+                                        return
 
                                 polygon = get_polygon_from_pts(target_pts)
 
@@ -461,25 +513,18 @@ def get_mask_boxes_locally(
                                 process_target(INDEX_NOSE, "nose")
                             if "口元" in mask_targets:
                                 process_target(INDEX_MOUTH, "mouth")
-        except Exception:
-            pass
 
-        # --- 2. 遠距離専用 Face Detection バックアップ ---
-        try:
-            with mp_face_detection.FaceDetection(
-                model_selection=1,
-                min_detection_confidence=conf_thresh
-            ) as face_detector:
-
+            # --- 2. 遠距離専用 FaceDetector バックアップ ---
+            if face_detector is not None:
                 for cx_off, cy_off, cw, ch in crops:
-                    crop_img = rotated_np[cy_off:cy_off+ch, cx_off:cx_off+cw]
+                    crop_img = rotated_np[cy_off:cy_off + ch, cx_off:cx_off + cw]
                     if crop_img.shape[0] < 15 or crop_img.shape[1] < 15:
                         continue
 
                     if scale_factor > 1.0 and (cw * scale_factor < 4000 and ch * scale_factor < 4000):
                         scaled_crop = cv2.resize(
-                            crop_img, 
-                            (int(cw * scale_factor), int(ch * scale_factor)), 
+                            crop_img,
+                            (int(cw * scale_factor), int(ch * scale_factor)),
                             interpolation=cv2.INTER_CUBIC
                         )
                         curr_scale = scale_factor
@@ -487,26 +532,34 @@ def get_mask_boxes_locally(
                         scaled_crop = crop_img
                         curr_scale = 1.0
 
-                    results = face_detector.process(scaled_crop)
+                    scaled_crop = np.ascontiguousarray(scaled_crop)
+
+                    try:
+                        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=scaled_crop)
+                        results = face_detector.detect(mp_image)
+                    except Exception:
+                        continue
+
                     if results and results.detections:
                         for detection in results.detections:
-                            bbox = detection.location_data.relative_bounding_box
-                            rx = cx_off + (bbox.xmin * cw * curr_scale) / curr_scale
-                            ry = cy_off + (bbox.ymin * ch * curr_scale) / curr_scale
-                            rw = (bbox.width * cw * curr_scale) / curr_scale
-                            rh = (bbox.height * ch * curr_scale) / curr_scale
+                            bbox = detection.bounding_box
+                            # FaceDetector(Tasks API) はピクセル座標(scaled_crop基準)を返すため curr_scale で正規化
+                            rx = cx_off + bbox.origin_x / curr_scale
+                            ry = cy_off + bbox.origin_y / curr_scale
+                            rw = bbox.width / curr_scale
+                            rh = bbox.height / curr_scale
 
                             if rw < min_size or rh < min_size:
                                 continue
 
-                            center_pt = (rx + rw // 2, ry + rh // 2)
+                            center_pt = (rx + rw / 2, ry + rh / 2)
                             axes = (max(1, int(rw // 2)), max(1, int(rh * 0.6)))
                             ellipse_pts = cv2.ellipse2Poly((int(center_pt[0]), int(center_pt[1])), axes, 0, 0, 360, 15)
-                            
+
                             orig_polygon = map_points_back(ellipse_pts, M_inv)
                             if len(orig_polygon) == 0:
                                 continue
-                            
+
                             x_coords = [p[0] for p in orig_polygon]
                             y_coords = [p[1] for p in orig_polygon]
                             xmin, xmax = min(x_coords), max(x_coords)
@@ -524,8 +577,17 @@ def get_mask_boxes_locally(
                                 "polygon": orig_polygon,
                                 "type": "face"
                             })
-        except Exception:
-            pass
+    finally:
+        if landmarker is not None:
+            try:
+                landmarker.close()
+            except Exception:
+                pass
+        if face_detector is not None:
+            try:
+                face_detector.close()
+            except Exception:
+                pass
 
     return detected_items
 
@@ -647,7 +709,7 @@ if uploaded_file is not None:
         else:
             if precision_level == "限界突破（スクランブル交差点・極限群衆）":
                 st.info("⚠️ 【限界突破モード】 画像を最大64分割し、50%重ね合わせながら超拡大ピラミッドスキャンを行います。")
-            
+
             with st.spinner("AIが指定された精度モードで画像をフル解析中..."):
                 try:
                     st.session_state.boxes = get_mask_boxes_locally(
