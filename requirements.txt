@@ -1,5 +1,5 @@
 streamlit
 opencv-python
-mediapipe
+mediapipe==1.0.0
 pillow
 numpy
