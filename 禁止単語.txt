@@ -137,7 +137,11 @@ TEL
 企画書
 仕様書
 @
-.jp
-gmail.com
+@yahoo.co.jp
+@docomo.ne.jp
+@gmail.com
+@icloud.com
+@outlook.jp
+@outlook.com
 社員番号
 学生番号
