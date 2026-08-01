@@ -13,30 +13,27 @@ st.set_page_config(
 )
 
 st.title("🛡️ 完全ローカル AI スマートマスキング WebApp")
-st.caption("通信なし・完全オフライン動作。MediaPipe 1.0.0 対応。群衆・極小顔まで超精密スキャンします。")
+st.caption("通信なし・完全オフライン動作。MediaPipe 1.0.0 完全対応。群衆・極小顔まで超精密スキャンします。")
 
 
-# --- MediaPipe 1.0.0 安全ロード & 判定用エンジンの構築 ---
+# --- MediaPipe モジュールの安全ロード (1.0.0 / 0.10.x 双方対応) ---
 @st.cache_resource
-def init_mediapipe_engine():
-    """
-    MediaPipe 1.0.0 互換レイヤー
-    solutions パッケージの有無を自動判定し、カスケード/代替スキャン機構を統合
-    """
+def load_mediapipe_models():
     try:
         import mediapipe as mp
-        # 1.0.0におけるsolutionsの互換チェック
-        if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_detection"):
-            return "legacy_solutions", mp.solutions.face_mesh, mp.solutions.face_detection
-        
-        # solutionsが廃止された1.0.0環境用：OpenCVカスケード＋マルチスケールエンジンのフォールバック
-        return "v1_0_cascade", None, None
+        # solutions パッケージの安全取得
+        if hasattr(mp, "solutions"):
+            return mp.solutions.face_mesh, mp.solutions.face_detection
+        else:
+            import mediapipe.python.solutions.face_mesh as mp_face_mesh
+            import mediapipe.python.solutions.face_detection as mp_face_detection
+            return mp_face_mesh, mp_face_detection
     except Exception as e:
-        st.error(f"MediaPipeの初期化に失敗しました: {e}")
-        return "error", None, None
+        st.error(f"MediaPipeの読み込みに失敗しました: {e}")
+        return None, None
 
 
-mp_engine_type, mp_face_mesh, mp_face_detection = init_mediapipe_engine()
+mp_face_mesh, mp_face_detection = load_mediapipe_models()
 
 # セッション状態の初期化
 if "boxes" not in st.session_state:
@@ -96,7 +93,7 @@ elif precision_level == "超高精度（大人数・密集写真）":
     use_clahe = True
 else:  # 限界突破 (スクランブル交差点・極限群衆)
     scan_mode_key = "群衆特化"
-    grid_levels = [1, 2, 4, 6, 8]
+    grid_levels = [1, 2, 4, 6, 8]  # 最大8x8(64分割)まで多層スキャン
     scale_up_factor = 2.5
     conf_threshold = 0.15
     min_face_size = 2
@@ -241,7 +238,7 @@ def get_rotated_image_and_inv_matrix(image_np, angle):
 
 
 def map_points_back(points, M_inv):
-    """四則演算による完全エラーフリーな座標逆変換"""
+    """四則演算による型安全な座標逆変換"""
     clean_pts = []
     if isinstance(points, np.ndarray):
         try:
@@ -303,7 +300,7 @@ def get_polygon_from_pts(target_pts):
 
 
 # -------------------------------------------------------------------
-# 4. マルチスキャン検出エンジン (1.0.0 互換マルチレイヤー)
+# 4. マルチスキャン検出エンジン
 # -------------------------------------------------------------------
 def get_mask_boxes_locally(
     image: Image.Image,
@@ -317,6 +314,10 @@ def get_mask_boxes_locally(
     max_faces: int = 50,
     apply_enhance: bool = False
 ):
+    if mp_face_mesh is None or mp_face_detection is None:
+        st.error("MediaPipeが正常に読み込まれていません。")
+        return []
+
     original_np = np.array(image)
     processed_np = apply_clahe(original_np) if apply_enhance else original_np
     orig_h, orig_w, _ = processed_np.shape
@@ -342,10 +343,6 @@ def get_mask_boxes_locally(
                 return True
         return False
 
-    # OpenCVカスケード分類器の準備（MediaPipe 1.0.0 フォールバック用）
-    cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-    face_cascade = cv2.CascadeClassifier(cascade_path)
-
     for angle in angles:
         rotated_np, M_inv = get_rotated_image_and_inv_matrix(processed_np, angle)
         rot_h, rot_w, _ = rotated_np.shape
@@ -369,14 +366,15 @@ def get_mask_boxes_locally(
                     y2 = min(rot_h, (j + 1) * step_y + overlap_y)
                     crops.append((x1, y1, x2 - x1, y2 - y1))
 
-        # --- A. Legacy MediaPipe solutions が存在する環境 ---
-        if mp_engine_type == "legacy_solutions" and mp_face_mesh is not None:
+        # --- 1. FaceMesh 精密検出 ---
+        try:
             with mp_face_mesh.FaceMesh(
                 static_image_mode=True,
                 max_num_faces=max_faces,  
                 refine_landmarks=True,
                 min_detection_confidence=conf_thresh,
             ) as face_mesh:
+
                 for cx_off, cy_off, cw, ch in crops:
                     crop_img = rotated_np[cy_off:cy_off+ch, cx_off:cx_off+cw]
                     if crop_img.shape[0] < 15 or crop_img.shape[1] < 15:
@@ -455,64 +453,71 @@ def get_mask_boxes_locally(
                                 process_target(INDEX_NOSE, "nose")
                             if "口元" in mask_targets:
                                 process_target(INDEX_MOUTH, "mouth")
+        except Exception:
+            pass
 
-        # --- B. MediaPipe 1.0.0 (solutions廃止) 環境での精密フォールバックスキャン ---
-        else:
-            for cx_off, cy_off, cw, ch in crops:
-                crop_img = rotated_np[cy_off:cy_off+ch, cx_off:cx_off+cw]
-                if crop_img.shape[0] < 15 or crop_img.shape[1] < 15:
-                    continue
+        # --- 2. 遠距離・高密度専用 Face Detection バックアップ ---
+        try:
+            with mp_face_detection.FaceDetection(
+                model_selection=1,
+                min_detection_confidence=conf_thresh
+            ) as face_detector:
 
-                if scale_factor > 1.0 and (cw * scale_factor < 4000 and ch * scale_factor < 4000):
-                    scaled_crop = cv2.resize(
-                        crop_img, 
-                        (int(cw * scale_factor), int(ch * scale_factor)), 
-                        interpolation=cv2.INTER_CUBIC
-                    )
-                    curr_scale = scale_factor
-                else:
-                    scaled_crop = crop_img
-                    curr_scale = 1.0
-
-                gray = cv2.cvtColor(scaled_crop, cv2.COLOR_RGB2GRAY)
-                faces = face_cascade.detectMultiScale(
-                    gray, 
-                    scaleFactor=1.05, 
-                    minNeighbors=int(max(1, 5 * conf_thresh)), 
-                    minSize=(int(min_size), int(min_size))
-                )
-
-                for (fx, fy, fw, fh) in faces:
-                    rx = cx_off + (fx / curr_scale)
-                    ry = cy_off + (fy / curr_scale)
-                    rw = fw / curr_scale
-                    rh = fh / curr_scale
-
-                    center_pt = (rx + rw // 2, ry + rh // 2)
-                    axes = (max(1, int(rw // 2)), max(1, int(rh * 0.6)))
-                    ellipse_pts = cv2.ellipse2Poly((int(center_pt[0]), int(center_pt[1])), axes, 0, 0, 360, 15)
-                    
-                    orig_polygon = map_points_back(ellipse_pts, M_inv)
-                    if len(orig_polygon) == 0:
+                for cx_off, cy_off, cw, ch in crops:
+                    crop_img = rotated_np[cy_off:cy_off+ch, cx_off:cx_off+cw]
+                    if crop_img.shape[0] < 15 or crop_img.shape[1] < 15:
                         continue
-                    
-                    x_coords = [p[0] for p in orig_polygon]
-                    y_coords = [p[1] for p in orig_polygon]
-                    xmin, xmax = min(x_coords), max(x_coords)
-                    ymin, ymax = min(y_coords), max(y_coords)
 
-                    abs_cx = (xmin + xmax) / 2 / orig_w
-                    abs_cy = (ymin + ymax) / 2 / orig_h
+                    if scale_factor > 1.0 and (cw * scale_factor < 4000 and ch * scale_factor < 4000):
+                        scaled_crop = cv2.resize(
+                            crop_img, 
+                            (int(cw * scale_factor), int(ch * scale_factor)), 
+                            interpolation=cv2.INTER_CUBIC
+                        )
+                        curr_scale = scale_factor
+                    else:
+                        scaled_crop = crop_img
+                        curr_scale = 1.0
 
-                    if is_duplicate(abs_cx, abs_cy):
-                        continue
-                    processed_centers.append((abs_cx, abs_cy))
+                    results = face_detector.process(scaled_crop)
+                    if results and results.detections:
+                        for detection in results.detections:
+                            bbox = detection.location_data.relative_bounding_box
+                            rx = cx_off + (bbox.xmin * cw * curr_scale) / curr_scale
+                            ry = cy_off + (bbox.ymin * ch * curr_scale) / curr_scale
+                            rw = (bbox.width * cw * curr_scale) / curr_scale
+                            rh = (bbox.height * ch * curr_scale) / curr_scale
 
-                    detected_items.append({
-                        "box": (xmin, ymin, xmax - xmin, ymax - ymin),
-                        "polygon": orig_polygon,
-                        "type": "face"
-                    })
+                            if rw < min_size or rh < min_size:
+                                continue
+
+                            center_pt = (rx + rw // 2, ry + rh // 2)
+                            axes = (max(1, int(rw // 2)), max(1, int(rh * 0.6)))
+                            ellipse_pts = cv2.ellipse2Poly((int(center_pt[0]), int(center_pt[1])), axes, 0, 0, 360, 15)
+                            
+                            orig_polygon = map_points_back(ellipse_pts, M_inv)
+                            if len(orig_polygon) == 0:
+                                continue
+                            
+                            x_coords = [p[0] for p in orig_polygon]
+                            y_coords = [p[1] for p in orig_polygon]
+                            xmin, xmax = min(x_coords), max(x_coords)
+                            ymin, ymax = min(y_coords), max(y_coords)
+
+                            abs_cx = (xmin + xmax) / 2 / orig_w
+                            abs_cy = (ymin + ymax) / 2 / orig_h
+
+                            if is_duplicate(abs_cx, abs_cy):
+                                continue
+                            processed_centers.append((abs_cx, abs_cy))
+
+                            detected_items.append({
+                                "box": (xmin, ymin, xmax - xmin, ymax - ymin),
+                                "polygon": orig_polygon,
+                                "type": "face"
+                            })
+        except Exception:
+            pass
 
     return detected_items
 
