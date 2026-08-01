@@ -26,10 +26,10 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 FACE_LANDMARKER_PATH = os.path.join(MODEL_DIR, "face_landmarker.task")
 FACE_DETECTOR_PATH = os.path.join(MODEL_DIR, "blaze_face_short_range.tflite")
 
-# 必要モデルの自動ダウンロード処理
+# 最新のGoogle公式直リンクURLに修正
 MODEL_URLS = {
     FACE_LANDMARKER_PATH: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
-    FACE_DETECTOR_PATH: "https://storage.googleapis.com/mediapipe-models/face_detector/face_detector/float16/1/face_detector.tflite"
+    FACE_DETECTOR_PATH: "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite"
 }
 
 def ensure_models_exist():
@@ -38,11 +38,19 @@ def ensure_models_exist():
             filename = os.path.basename(path)
             with st.spinner(f"📦 必要なモデルファイル ({filename}) を初期ダウンロード中..."):
                 try:
-                    urllib.request.urlretrieve(url, path)
+                    req = urllib.request.Request(
+                        url, 
+                        headers={'User-Agent': 'Mozilla/5.0'}
+                    )
+                    with urllib.request.urlopen(req) as response, open(path, 'wb') as out_file:
+                        out_file.write(response.read())
                     st.success(f"✨ {filename} のダウンロードが完了しました！")
                 except Exception as e:
-                    st.error(f"❌ {filename} のダウンロードに失敗しました: {e}")
-                    st.stop()
+                    if filename == "face_landmarker.task":
+                        st.error(f"❌ 必須モデル ({filename}) のダウンロードに失敗しました: {e}")
+                        st.stop()
+                    else:
+                        st.warning(f"⚠️ サブモデル ({filename}) のダウンロードをスキップしました (Landmarker単体で動作します): {e}")
 
 ensure_models_exist()
 
@@ -53,26 +61,33 @@ def load_mediapipe_tasks():
         from mediapipe.tasks import python as mp_python
         from mediapipe.tasks.python import vision
         
-        # 精密ランドマーク用
-        base_options_lm = mp_python.BaseOptions(model_asset_path=FACE_LANDMARKER_PATH)
-        options_lm = vision.FaceLandmarkerOptions(
-            base_options=base_options_lm,
-            running_mode=vision.RunningMode.IMAGE,
-            num_faces=150,
-            min_face_detection_confidence=0.01,
-            min_face_presence_confidence=0.01,
-            min_tracking_confidence=0.01,
-        )
-        landmarker = vision.FaceLandmarker.create_from_options(options_lm)
+        # 精密ランドマーク用 (必須)
+        landmarker = None
+        if os.path.exists(FACE_LANDMARKER_PATH):
+            base_options_lm = mp_python.BaseOptions(model_asset_path=FACE_LANDMARKER_PATH)
+            options_lm = vision.FaceLandmarkerOptions(
+                base_options=base_options_lm,
+                running_mode=vision.RunningMode.IMAGE,
+                num_faces=150,
+                min_face_detection_confidence=0.01,
+                min_face_presence_confidence=0.01,
+                min_tracking_confidence=0.01,
+            )
+            landmarker = vision.FaceLandmarker.create_from_options(options_lm)
         
-        # 高感度検出用
-        base_options_det = mp_python.BaseOptions(model_asset_path=FACE_DETECTOR_PATH)
-        options_det = vision.FaceDetectorOptions(
-            base_options=base_options_det,
-            running_mode=vision.RunningMode.IMAGE,
-            min_detection_confidence=0.01,
-        )
-        detector = vision.FaceDetector.create_from_options(options_det)
+        # 高感度検出用 (オプション)
+        detector = None
+        if os.path.exists(FACE_DETECTOR_PATH):
+            try:
+                base_options_det = mp_python.BaseOptions(model_asset_path=FACE_DETECTOR_PATH)
+                options_det = vision.FaceDetectorOptions(
+                    base_options=base_options_det,
+                    running_mode=vision.RunningMode.IMAGE,
+                    min_detection_confidence=0.01,
+                )
+                detector = vision.FaceDetector.create_from_options(options_det)
+            except Exception:
+                pass
 
         return mp, landmarker, detector
     except Exception as e:
@@ -300,8 +315,8 @@ def get_mask_boxes_locally(
     scale_factor: float = 3.0,
     dup_thresh: float = 0.30,
 ):
-    if landmarker is None or detector is None:
-        st.error("MediaPipeエンジンの初期化に失敗しています。")
+    if landmarker is None:
+        st.error("FaceLandmarkerエンジンの初期化に失敗しています。")
         return []
 
     orig_w, orig_h = image.size
@@ -349,37 +364,38 @@ def get_mask_boxes_locally(
         crop_np = np.array(scaled_crop)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(crop_np))
 
-        # --- A. FaceDetector ---
-        try:
-            result_det = detector.detect(mp_image)
-            if result_det and result_det.detections:
-                for detection in result_det.detections:
-                    score = detection.categories[0].score
-                    bbox = detection.bounding_box
-                    real_x = cx_off + (bbox.origin_x / curr_scale)
-                    real_y = cy_off + (bbox.origin_y / curr_scale)
-                    real_w = bbox.width / curr_scale
-                    real_h = bbox.height / curr_scale
+        # --- A. FaceDetector (利用可能な場合) ---
+        if detector is not None:
+            try:
+                result_det = detector.detect(mp_image)
+                if result_det and result_det.detections:
+                    for detection in result_det.detections:
+                        score = detection.categories[0].score
+                        bbox = detection.bounding_box
+                        real_x = cx_off + (bbox.origin_x / curr_scale)
+                        real_y = cy_off + (bbox.origin_y / curr_scale)
+                        real_w = bbox.width / curr_scale
+                        real_h = bbox.height / curr_scale
 
-                    if real_w < 3 or real_h < 3: continue
+                        if real_w < 3 or real_h < 3: continue
 
-                    center_pt = (real_x + real_w/2, real_y + real_h/2)
-                    axes = (max(1, int(real_w / 2 * 1.1)), max(1, int(real_h * 0.7)))
-                    num_pts = 20
-                    ellipse_pts = []
-                    for i in range(num_pts):
-                        angle = 2 * math.pi * i / num_pts
-                        ellipse_pts.append((center_pt[0] + axes[0]*math.cos(angle), center_pt[1] + axes[1]*math.sin(angle)))
+                        center_pt = (real_x + real_w/2, real_y + real_h/2)
+                        axes = (max(1, int(real_w / 2 * 1.1)), max(1, int(real_h * 0.7)))
+                        num_pts = 20
+                        ellipse_pts = []
+                        for i in range(num_pts):
+                            angle = 2 * math.pi * i / num_pts
+                            ellipse_pts.append((center_pt[0] + axes[0]*math.cos(angle), center_pt[1] + axes[1]*math.sin(angle)))
 
-                    all_raw_items.append({
-                        "box": (real_x, real_y, real_w, real_h),
-                        "center": center_pt,
-                        "polygon": get_polygon_hull_pil(ellipse_pts),
-                        "score": score,
-                        "engine": "detector",
-                        "indices": None
-                    })
-        except: pass
+                        all_raw_items.append({
+                            "box": (real_x, real_y, real_w, real_h),
+                            "center": center_pt,
+                            "polygon": get_polygon_hull_pil(ellipse_pts),
+                            "score": score,
+                            "engine": "detector",
+                            "indices": None
+                        })
+            except: pass
 
         # --- B. FaceLandmarker ---
         try:
