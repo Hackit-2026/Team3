@@ -1,13 +1,16 @@
 @echo off
 chcp 65001 > nul
+
 echo ==========================================
-echo  初回セットアップを開始します...
+echo ライブラリを更新しています...
 echo ==========================================
-echo.
+
+pip uninstall -y mediapipe opencv-python protobuf numpy pillow streamlit
+
 pip install -r requirements.txt
+
 echo.
 echo ==========================================
-echo  セットアップが完了しました！
-echo  次回からは「起動.bat」でアプリを開けます。
+echo セットアップ完了
 echo ==========================================
 pause

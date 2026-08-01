@@ -1,786 +1,2840 @@
+# =====================================================
+# AI Smart Masking Pro
+# =====================================================
+
 import io
 import os
-import urllib.request
+import math
+import traceback
+
 import cv2
 import numpy as np
 import streamlit as st
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
-import traceback
 
-# -------------------------------------------------------------------
-# 1. ページ基本設定
-# -------------------------------------------------------------------
+from PIL import (
+    Image,
+    ImageDraw,
+    ImageFilter,
+    ImageFont
+)
+
+# =====================================================
+# APP CONFIG
+# =====================================================
+
 st.set_page_config(
-    page_title="完全ローカル AI マスキング", page_icon="🛡️", layout="wide"
+    page_title="AI Smart Masking Pro",
+    page_icon="🛡️",
+    layout="wide"
 )
 
-st.title("🛡️ 完全ローカル AI スマートマスキング WebApp")
-st.caption("完全オフライン動作（初回起動時のみモデルファイルのダウンロードに通信が必要です）。詳細エラー診断機能付き。")
+st.title("🛡️ AI Smart Masking Pro")
 
+# =====================================================
+# MODEL PATHS
+# =====================================================
 
-# -------------------------------------------------------------------
-# MediaPipe Tasks API（新API）モデルの準備＆ロード
-# -------------------------------------------------------------------
-MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mp_models")
-
-FACE_LANDMARKER_URL = (
-    "https://storage.googleapis.com/mediapipe-models/"
-    "face_landmarker/face_landmarker/float16/latest/face_landmarker.task"
-)
-# 遠距離・群衆向けの full_range モデル（旧 model_selection=1 相当）
-FACE_DETECTOR_URL = (
-    "https://storage.googleapis.com/mediapipe-models/"
-    "face_detector/blaze_face_full_range/float16/1/blaze_face_full_range.tflite"
+MODEL_DIR = os.path.join(
+    os.path.dirname(
+        os.path.abspath(__file__)
+    ),
+    "mp_models"
 )
 
-FACE_LANDMARKER_PATH = os.path.join(MODEL_DIR, "face_landmarker.task")
-FACE_DETECTOR_PATH = os.path.join(MODEL_DIR, "blaze_face_full_range.tflite")
+FACE_DETECTOR_PATH = os.path.join(
+    MODEL_DIR,
+    "blaze_face_full_range.tflite"
+)
 
+FACE_LANDMARKER_PATH = os.path.join(
+    MODEL_DIR,
+    "face_landmarker.task"
+)
 
-def _ensure_model(url: str, dest_path: str):
-    """モデルファイルが無ければダウンロードする（初回のみ通信発生）。"""
-    if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
-        return
-    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-    urllib.request.urlretrieve(url, dest_path)
+# =====================================================
+# GLOBAL SETTINGS
+# =====================================================
 
+RIGHT_EYE = []
+LEFT_EYE = []
+NOSE = []
+MOUTH = []
+
+# =====================================================
+# ADD HERE
+# =====================================================
+
+# =====================================================
+# MEDIAPIPE LOADER
+# =====================================================
 
 @st.cache_resource
-def load_mediapipe_models():
-    """
-    MediaPipe 1.x 系では mp.solutions.face_mesh / face_detection の
-    レガシー Solutions API が廃止されているため、新しい Tasks API
-    （FaceLandmarker / FaceDetector）を使用する。
-    Tasks API はモデルをパッケージに同梱していないため、
-    .task / .tflite モデルファイルをローカルにキャッシュしてから利用する。
-    """
+def load_mediapipe():
+
     try:
+
         import mediapipe as mp
-        from mediapipe.tasks import python as mp_python
-        from mediapipe.tasks.python import vision
 
-        with st.spinner("初回起動中：AIモデルファイルを準備しています..."):
-            _ensure_model(FACE_LANDMARKER_URL, FACE_LANDMARKER_PATH)
-            _ensure_model(FACE_DETECTOR_URL, FACE_DETECTOR_PATH)
+        from mediapipe.tasks import (
+            python as mp_python
+        )
 
-        return mp, mp_python, vision
+        from mediapipe.tasks.python import (
+            vision
+        )
+
+        return (
+            mp,
+            mp_python,
+            vision
+        )
 
     except Exception:
-        error_detail = traceback.format_exc()
-        st.error(f"❌ MediaPipeの読み込みに失敗しました。\n\n**詳細エラー:**\n```text\n{error_detail}\n```")
-        return None, None, None
+
+        st.error(
+            traceback.format_exc()
+        )
+
+        st.stop()
 
 
-mp, mp_python, mp_vision = load_mediapipe_models()
-
-# セッション状態の初期化
-if "boxes" not in st.session_state:
-    st.session_state.boxes = None
-if "confirmed" not in st.session_state:
-    st.session_state.confirmed = False
-if "file_id" not in st.session_state:
-    st.session_state.file_id = None
-
-# -------------------------------------------------------------------
-# 2. サイドバー設定
-# -------------------------------------------------------------------
-st.sidebar.header("⚙️ マスク設定")
-st.sidebar.success("🔒 完全ローカルモード (モデル取得後はWi-FiオフでもOK)")
-
-# 🎯 検出精度モード
-st.sidebar.subheader("🔍 検出精度")
-precision_level = st.sidebar.radio(
-    "精度モードを選択",
-    [
-        "普通（標準バランス）",
-        "高精度（集合写真・少人数）",
-        "超高精度（大人数・密集写真）",
-        "限界突破（スクランブル交差点・極限群衆）",
-    ],
-    index=3,
-    help="「限界突破」は50%オーバーラップの多層ピラミッドスキャンを行い、極小顔を極限まで検出します。"
+mp, mp_python, mp_vision = (
+    load_mediapipe()
 )
 
-# モードごとのパラメータ設計
-if precision_level == "普通（標準バランス）":
-    scan_mode_key = "標準"
-    grid_levels = [1, 2]
-    scale_up_factor = 1.0
-    conf_threshold = 0.35
-    min_face_size = 15
-    dup_thresh = 0.04
-    max_faces_limit = 20
-    use_clahe = False
-elif precision_level == "高精度（集合写真・少人数）":
-    scan_mode_key = "高精度"
-    grid_levels = [1, 2, 3]
-    scale_up_factor = 1.2
-    conf_threshold = 0.35
-    min_face_size = 12
-    dup_thresh = 0.02
-    max_faces_limit = 50
-    use_clahe = False
-elif precision_level == "超高精度（大人数・密集写真）":
-    scan_mode_key = "超高精度"
-    grid_levels = [1, 2, 4, 5]
-    scale_up_factor = 1.8
-    conf_threshold = 0.25
-    min_face_size = 8
-    dup_thresh = 0.012
-    max_faces_limit = 150
-    use_clahe = True
-else:  # 限界突破 (スクランブル交差点・極限群衆)
-    scan_mode_key = "群衆特化"
-    grid_levels = [1, 2, 4, 6, 8]
-    scale_up_factor = 2.5
-    conf_threshold = 0.15
-    min_face_size = 2
-    dup_thresh = 0.005
-    max_faces_limit = 300
-    use_clahe = True
+# =====================================================
+# MODEL CHECK
+# =====================================================
 
-st.sidebar.markdown("---")
-
-# 🎯 マスク対象
-st.sidebar.subheader("🎯 マスク対象")
-mask_targets = st.sidebar.multiselect(
-    "加工したい部位を選んでください",
-    [
-        "目元（両目）",
-        "右目 (解剖学的)",
-        "左目 (解剖学的)",
-        "鼻",
-        "口元",
-        "顔全体",
-    ],
-    default=["顔全体"],
-)
-
-# 🔷 マスク形状
-st.sidebar.subheader("📐 マスクの形状")
-mask_shape = st.sidebar.radio(
-    "形状スタイル",
-    ["顔の形（輪郭に沿う）", "四角（矩形）"],
-    index=0,
-)
-
-# 🎨 スタイル選択
-st.sidebar.subheader("🎨 マスキングスタイル")
-mask_type = st.sidebar.selectbox(
-    "スタイル",
-    [
-        "ピクセルモザイク",
-        "ぼかし（ブラー）",
-        "絵文字スタンプ",
-        "塗りつぶし（カラー指定）",
-        "タイル状モザイク (グリッド)",
-    ],
-    index=0,
-)
-
-grid_size = 30
-mosaic_size = 15
-blur_radius = 20
-fill_color = "#000000"
-emoji_char = "🌸"
-emoji_scale = 110
-emoji_angle = 0
-offset_x = 0
-offset_y = 0
-
-if mask_type == "タイル状モザイク (グリッド)":
-    grid_size = st.sidebar.slider("タイルの大きさ (ピクセル)", 10, 100, 30, 5)
-elif mask_type == "絵文字スタンプ":
-    emoji_char = st.sidebar.text_input("使用する絵文字を入力", value="🌸")
-    emoji_scale = st.sidebar.slider("絵文字の倍率 (%)", 70, 200, 110, 5)
-    emoji_angle = st.sidebar.slider("絵文字の回転角度 (°)", -180, 180, 0, 5)
-    st.sidebar.markdown("##### 📍 位置微調整")
-    offset_y = st.sidebar.slider("上下位置 (Y軸)", -50, 50, 0, 2)
-    offset_x = st.sidebar.slider("左右位置 (X軸)", -50, 50, 0, 2)
-elif mask_type == "ピクセルモザイク":
-    mosaic_size = st.sidebar.slider("モザイクの粗さ", 5, 30, 15)
-elif mask_type == "ぼかし（ブラー）":
-    blur_radius = st.sidebar.slider("ぼかしの強さ", 5, 50, 20)
-elif mask_type == "塗りつぶし（カラー指定）":
-    fill_color = st.sidebar.color_picker("塗りつぶしの色", "#000000")
-
-
-# -------------------------------------------------------------------
-# 3. 安全な幾何・画像処理ユーティリティ
-# -------------------------------------------------------------------
-def get_emoji_font(font_size: int):
-    font_candidates = ["seguiemj.ttf", "NotoColorEmoji.ttf", "Apple Color Emoji.ttc", "arial.ttf"]
-    for font_name in font_candidates:
-        try:
-            return ImageFont.truetype(font_name, font_size)
-        except Exception:
-            continue
-    return ImageFont.load_default()
-
-
-def create_cropped_emoji_image(emoji_char: str, target_size: int) -> Image.Image:
-    canvas_size = max(250, int(target_size * 1.5))
-    temp_img = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(temp_img)
-    font = get_emoji_font(int(canvas_size * 0.7))
-
-    try:
-        draw.text((canvas_size / 2, canvas_size / 2), emoji_char, font=font, anchor="mm", embedded_color=True)
-    except Exception:
-        draw.text((canvas_size / 2, canvas_size / 2), emoji_char, font=font, anchor="mm", fill=(0, 0, 0))
-
-    bbox = temp_img.getbbox()
-    cropped = temp_img.crop(bbox) if bbox else temp_img
-    w, h = cropped.size
-    if w == 0 or h == 0:
-        return Image.new("RGBA", (target_size, target_size), (0, 0, 0, 0))
-
-    aspect = w / h
-    new_w = target_size if aspect > 1 else max(1, int(target_size * aspect))
-    new_h = max(1, int(target_size / aspect)) if aspect > 1 else target_size
-    return cropped.resize((new_w, new_h), Image.Resampling.LANCZOS)
-
-
-def apply_clahe(img_np):
-    try:
-        lab = cv2.cvtColor(img_np, cv2.COLOR_RGB2LAB)
-        l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-        cl = clahe.apply(l)
-        limg = cv2.merge((cl, a, b))
-        return cv2.cvtColor(limg, cv2.COLOR_LAB2RGB)
-    except Exception:
-        return img_np
-
-
-def get_rotated_image_and_inv_matrix(image_np, angle):
-    if angle == 0:
-        return image_np, None
-
-    h, w = image_np.shape[:2]
-    center = (w / 2.0, h / 2.0)
-
-    M = cv2.getRotationMatrix2D(center, angle, 1.0)
-    cos = np.abs(M[0, 0])
-    sin = np.abs(M[0, 1])
-    new_w = int((h * sin) + (w * cos))
-    new_h = int((h * cos) + (w * sin))
-
-    M[0, 2] += (new_w / 2.0) - center[0]
-    M[1, 2] += (new_h / 2.0) - center[1]
-
-    rotated_img = cv2.warpAffine(image_np, M, (new_w, new_h))
-    M_inv = cv2.invertAffineTransform(M)
-    return rotated_img, M_inv
-
-
-def map_points_back(points, M_inv):
-    clean_pts = []
-    if isinstance(points, np.ndarray):
-        try:
-            pts_2d = points.reshape(-1, 2)
-            for p in pts_2d:
-                clean_pts.append((float(p[0]), float(p[1])))
-        except Exception:
-            pass
-    else:
-        for p in points:
-            if isinstance(p, (tuple, list, np.ndarray)) and len(p) >= 2:
-                try:
-                    clean_pts.append((float(p[0]), float(p[1])))
-                except Exception:
-                    pass
-
-    if len(clean_pts) == 0:
-        return []
-
-    if M_inv is None:
-        return [(int(p[0]), int(p[1])) for p in clean_pts]
-
-    m00 = float(M_inv[0][0])
-    m01 = float(M_inv[0][1])
-    m02 = float(M_inv[0][2])
-    m10 = float(M_inv[1][0])
-    m11 = float(M_inv[1][1])
-    m12 = float(M_inv[1][2])
-
-    res = []
-    for x, y in clean_pts:
-        x_orig = int(m00 * x + m01 * y + m02)
-        y_orig = int(m10 * x + m11 * y + m12)
-        res.append((x_orig, y_orig))
-
-    return res
-
-
-def get_polygon_from_pts(target_pts):
-    if not target_pts or len(target_pts) < 3:
-        return [(int(p[0]), int(p[1])) for p in target_pts]
-
-    try:
-        pts_np = np.array(target_pts, dtype=np.int32).reshape(-1, 2)
-        hull = cv2.convexHull(pts_np)
-        polygon = []
-        if hull is not None:
-            try:
-                hull_flat = hull.reshape(-1, 2)
-                for pt in hull_flat:
-                    polygon.append((int(pt[0]), int(pt[1])))
-            except Exception:
-                polygon = [(int(p[0]), int(p[1])) for p in target_pts]
-        if not polygon:
-            polygon = [(int(p[0]), int(p[1])) for p in target_pts]
-        return polygon
-    except Exception:
-        return [(int(p[0]), int(p[1])) for p in target_pts]
-
-
-# -------------------------------------------------------------------
-# 4. マルチスキャン検出エンジン（MediaPipe Tasks API 版）
-# -------------------------------------------------------------------
-def get_mask_boxes_locally(
-    image: Image.Image,
-    mask_targets: list,
-    scan_key: str,
-    grids: list,
-    scale_factor: float = 1.4,
-    conf_thresh: float = 0.35,
-    min_size: int = 12,
-    dup_thresh: float = 0.02,
-    max_faces: int = 50,
-    apply_enhance: bool = False
+if not os.path.exists(
+    FACE_DETECTOR_PATH
 ):
-    if mp is None or mp_python is None or mp_vision is None:
-        st.error("MediaPipeが正常に読み込まれていません。")
-        return []
 
-    original_np = np.array(image)
-    processed_np = apply_clahe(original_np) if apply_enhance else original_np
-    orig_h, orig_w, _ = processed_np.shape
+    st.error(
+        "blaze_face_full_range.tflite がありません"
+    )
 
-    detected_items = []
-    processed_centers = []
+    st.stop()
 
-    INDEX_RIGHT_EYE = [33, 133, 160, 159, 158, 144, 145, 153]
-    INDEX_LEFT_EYE = [362, 263, 387, 386, 385, 373, 374, 380]
-    INDEX_NOSE = [1, 2, 98, 327, 278, 48]
-    INDEX_MOUTH = [61, 291, 37, 267, 0, 17, 18, 14, 87, 317]
 
-    if scan_key == "群衆特化":
-        angles = [0, 15, -15, 30, -30]
-    elif scan_key == "超高精度":
-        angles = [0, 15, -15]
-    else:
-        angles = [0]
+if not os.path.exists(
+    FACE_LANDMARKER_PATH
+):
 
-    def is_duplicate(cx, cy):
-        for pcx, pcy in processed_centers:
-            if abs(pcx - cx) < dup_thresh and abs(pcy - cy) < dup_thresh:
-                return True
-        return False
+    st.error(
+        "face_landmarker.task がありません"
+    )
 
-    # --- Tasks API: FaceLandmarker / FaceDetector を一度だけ生成して使い回す ---
-    landmarker = None
-    face_detector = None
-    try:
-        landmarker_options = mp_vision.FaceLandmarkerOptions(
-            base_options=mp_python.BaseOptions(model_asset_path=FACE_LANDMARKER_PATH),
-            running_mode=mp_vision.RunningMode.IMAGE,
-            num_faces=max_faces,
-            min_face_detection_confidence=conf_thresh,
-            min_face_presence_confidence=conf_thresh,
-            min_tracking_confidence=conf_thresh,
-            output_face_blendshapes=False,
-            output_facial_transformation_matrixes=False,
+    st.stop()
+
+# =====================================================
+# DETECTOR
+# =====================================================
+
+@st.cache_resource
+def create_detector():
+
+    options = (
+        mp_vision.FaceDetectorOptions(
+            base_options=
+            mp_python.BaseOptions(
+                model_asset_path=
+                FACE_DETECTOR_PATH
+            ),
+
+            running_mode=
+            mp_vision.RunningMode.IMAGE,
+
+            min_detection_confidence=0.25
         )
-        landmarker = mp_vision.FaceLandmarker.create_from_options(landmarker_options)
-    except Exception:
-        landmarker = None
+    )
 
-    try:
-        detector_options = mp_vision.FaceDetectorOptions(
-            base_options=mp_python.BaseOptions(model_asset_path=FACE_DETECTOR_PATH),
-            running_mode=mp_vision.RunningMode.IMAGE,
-            min_detection_confidence=conf_thresh,
+    return (
+        mp_vision.FaceDetector
+        .create_from_options(
+            options
         )
-        face_detector = mp_vision.FaceDetector.create_from_options(detector_options)
-    except Exception:
-        face_detector = None
+    )
+
+# =====================================================
+# LANDMARKER
+# =====================================================
+
+@st.cache_resource
+def create_landmarker():
+
+    options = (
+        mp_vision.FaceLandmarkerOptions(
+
+            base_options=
+            mp_python.BaseOptions(
+                model_asset_path=
+                FACE_LANDMARKER_PATH
+            ),
+
+            running_mode=
+            mp_vision.RunningMode.IMAGE,
+
+            num_faces=300,
+
+            min_face_detection_confidence=
+            0.20,
+
+            min_face_presence_confidence=
+            0.20,
+
+            min_tracking_confidence=
+            0.20,
+
+            output_face_blendshapes=
+            False,
+
+            output_facial_transformation_matrixes=
+            False
+        )
+    )
+
+    return (
+        mp_vision.FaceLandmarker
+        .create_from_options(
+            options
+        )
+    )
+
+
+detector = (
+    create_detector()
+)
+
+landmarker = (
+    create_landmarker()
+)
+
+# =====================================================
+# MEDIAPIPE IMAGE HELPER
+# =====================================================
+
+def to_mp_image(image):
+
+    image_np = np.array(
+        image
+    )
+
+    return mp.Image(
+        image_format=
+        mp.ImageFormat.SRGB,
+        data=
+        np.ascontiguousarray(
+            image_np
+        )
+    )
+# =====================================================
+# FACE DETECTOR ENGINE
+# =====================================================
+
+def detect_faces_detector(
+    image,
+    confidence=0.25
+):
+
+    results_boxes = []
 
     try:
-        for angle in angles:
-            rotated_np, M_inv = get_rotated_image_and_inv_matrix(processed_np, angle)
-            rot_h, rot_w, _ = rotated_np.shape
 
-            crops = []
-            for g in grids:
-                if g == 1:
-                    crops.append((0, 0, rot_w, rot_h))
+        mp_image = to_mp_image(
+            image
+        )
+
+        detection_result = (
+            detector.detect(
+                mp_image
+            )
+        )
+
+        if (
+            detection_result is None
+            or
+            detection_result.detections is None
+        ):
+            return []
+
+        for detection in (
+            detection_result.detections
+        ):
+
+            try:
+
+                bbox = (
+                    detection.bounding_box
+                )
+
+                x = int(
+                    bbox.origin_x
+                )
+
+                y = int(
+                    bbox.origin_y
+                )
+
+                w = int(
+                    bbox.width
+                )
+
+                h = int(
+                    bbox.height
+                )
+
+                if (
+                    w <= 0
+                    or
+                    h <= 0
+                ):
                     continue
 
-                step_x = rot_w // g
-                step_y = rot_h // g
-                overlap_x = int(step_x * 0.5)
-                overlap_y = int(step_y * 0.5)
-
-                for i in range(g):
-                    for j in range(g):
-                        x1 = max(0, i * step_x - overlap_x)
-                        y1 = max(0, j * step_y - overlap_y)
-                        x2 = min(rot_w, (i + 1) * step_x + overlap_x)
-                        y2 = min(rot_h, (j + 1) * step_y + overlap_y)
-                        crops.append((x1, y1, x2 - x1, y2 - y1))
-
-            # --- 1. FaceLandmarker 精密検出 ---
-            if landmarker is not None:
-                for cx_off, cy_off, cw, ch in crops:
-                    crop_img = rotated_np[cy_off:cy_off + ch, cx_off:cx_off + cw]
-                    if crop_img.shape[0] < 15 or crop_img.shape[1] < 15:
-                        continue
-
-                    if scale_factor > 1.0 and (cw * scale_factor < 4000 and ch * scale_factor < 4000):
-                        scaled_crop = cv2.resize(
-                            crop_img,
-                            (int(cw * scale_factor), int(ch * scale_factor)),
-                            interpolation=cv2.INTER_CUBIC
-                        )
-                        curr_scale = scale_factor
-                    else:
-                        scaled_crop = crop_img
-                        curr_scale = 1.0
-
-                    scaled_crop = np.ascontiguousarray(scaled_crop)
-
-                    try:
-                        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=scaled_crop)
-                        results = landmarker.detect(mp_image)
-                    except Exception:
-                        continue
-
-                    if results and results.face_landmarks:
-                        for landmarks in results.face_landmarks:
-                            rot_pts_all = [
-                                (cx_off + lm.x * cw, cy_off + lm.y * ch)
-                                for lm in landmarks
-                            ]
-
-                            orig_pts_all = map_points_back(rot_pts_all, M_inv)
-                            if len(orig_pts_all) == 0:
-                                continue
-
-                            abs_cx = sum(p[0] for p in orig_pts_all) / len(orig_pts_all) / orig_w
-                            abs_cy = sum(p[1] for p in orig_pts_all) / len(orig_pts_all) / orig_h
-
-                            if is_duplicate(abs_cx, abs_cy):
-                                continue
-
-                            def process_target(indices, target_type):
-                                target_pts = [orig_pts_all[i] for i in indices if i < len(orig_pts_all)]
-                                if not target_pts:
-                                    return
-                                x_coords = [p[0] for p in target_pts]
-                                y_coords = [p[1] for p in target_pts]
-                                xmin, xmax = min(x_coords), max(x_coords)
-                                ymin, ymax = min(y_coords), max(y_coords)
-
-                                w_box, h_box = xmax - xmin, ymax - ymin
-                                if w_box < min_size or h_box < min_size:
-                                    return
-
-                                if w_box > 0 and h_box > 0:
-                                    aspectRatio = w_box / h_box
-                                    if aspectRatio > 3.0 or aspectRatio < 0.3:
-                                        return
-
-                                polygon = get_polygon_from_pts(target_pts)
-
-                                processed_centers.append((abs_cx, abs_cy))
-                                detected_items.append({
-                                    "box": (xmin, ymin, w_box, h_box),
-                                    "polygon": polygon,
-                                    "type": target_type
-                                })
-
-                            if "顔全体" in mask_targets:
-                                process_target(range(0, 468), "face")
-                            if "目元（両目）" in mask_targets:
-                                process_target(INDEX_RIGHT_EYE + INDEX_LEFT_EYE, "eyes")
-                            if "右目 (解剖学的)" in mask_targets:
-                                process_target(INDEX_RIGHT_EYE, "eye_r")
-                            if "左目 (解剖学的)" in mask_targets:
-                                process_target(INDEX_LEFT_EYE, "eye_l")
-                            if "鼻" in mask_targets:
-                                process_target(INDEX_NOSE, "nose")
-                            if "口元" in mask_targets:
-                                process_target(INDEX_MOUTH, "mouth")
-
-            # --- 2. 遠距離専用 FaceDetector バックアップ ---
-            if face_detector is not None:
-                for cx_off, cy_off, cw, ch in crops:
-                    crop_img = rotated_np[cy_off:cy_off + ch, cx_off:cx_off + cw]
-                    if crop_img.shape[0] < 15 or crop_img.shape[1] < 15:
-                        continue
-
-                    if scale_factor > 1.0 and (cw * scale_factor < 4000 and ch * scale_factor < 4000):
-                        scaled_crop = cv2.resize(
-                            crop_img,
-                            (int(cw * scale_factor), int(ch * scale_factor)),
-                            interpolation=cv2.INTER_CUBIC
-                        )
-                        curr_scale = scale_factor
-                    else:
-                        scaled_crop = crop_img
-                        curr_scale = 1.0
-
-                    scaled_crop = np.ascontiguousarray(scaled_crop)
-
-                    try:
-                        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=scaled_crop)
-                        results = face_detector.detect(mp_image)
-                    except Exception:
-                        continue
-
-                    if results and results.detections:
-                        for detection in results.detections:
-                            bbox = detection.bounding_box
-                            # FaceDetector(Tasks API) はピクセル座標(scaled_crop基準)を返すため curr_scale で正規化
-                            rx = cx_off + bbox.origin_x / curr_scale
-                            ry = cy_off + bbox.origin_y / curr_scale
-                            rw = bbox.width / curr_scale
-                            rh = bbox.height / curr_scale
-
-                            if rw < min_size or rh < min_size:
-                                continue
-
-                            center_pt = (rx + rw / 2, ry + rh / 2)
-                            axes = (max(1, int(rw // 2)), max(1, int(rh * 0.6)))
-                            ellipse_pts = cv2.ellipse2Poly((int(center_pt[0]), int(center_pt[1])), axes, 0, 0, 360, 15)
-
-                            orig_polygon = map_points_back(ellipse_pts, M_inv)
-                            if len(orig_polygon) == 0:
-                                continue
-
-                            x_coords = [p[0] for p in orig_polygon]
-                            y_coords = [p[1] for p in orig_polygon]
-                            xmin, xmax = min(x_coords), max(x_coords)
-                            ymin, ymax = min(y_coords), max(y_coords)
-
-                            abs_cx = (xmin + xmax) / 2 / orig_w
-                            abs_cy = (ymin + ymax) / 2 / orig_h
-
-                            if is_duplicate(abs_cx, abs_cy):
-                                continue
-                            processed_centers.append((abs_cx, abs_cy))
-
-                            detected_items.append({
-                                "box": (xmin, ymin, xmax - xmin, ymax - ymin),
-                                "polygon": orig_polygon,
-                                "type": "face"
-                            })
-    finally:
-        if landmarker is not None:
-            try:
-                landmarker.close()
-            except Exception:
-                pass
-        if face_detector is not None:
-            try:
-                face_detector.close()
-            except Exception:
-                pass
-
-    return detected_items
-
-
-# -------------------------------------------------------------------
-# 5. マスキング画像適用処理
-# -------------------------------------------------------------------
-def apply_masking(
-    image: Image.Image,
-    items: list,
-    mask_shape: str,
-    mask_type: str,
-    grid_size: int,
-    mosaic_size: int,
-    blur_radius: int,
-    fill_color: str,
-    offset_x: int,
-    offset_y: int,
-    emoji_char: str,
-    emoji_scale: int,
-    emoji_angle: int,
-) -> Image.Image:
-    result_img = image.copy()
-    img_w, img_h = image.size
-
-    # --- タイル状モザイクの場合 ---
-    if mask_type == "タイル状モザイク (グリッド)":
-        target_rects = [item["box"] for item in items]
-        for gx in range(0, img_w, grid_size):
-            for gy in range(0, img_h, grid_size):
-                tile_l, tile_t = gx, gy
-                tile_r, tile_b = min(img_w, gx + grid_size), min(img_h, gy + grid_size)
-
-                has_face = False
-                for bx, by, bw, bh in target_rects:
-                    if max(tile_l, bx) < min(tile_r, bx + bw) and max(tile_t, by) < min(tile_b, by + bh):
-                        has_face = True
-                        break
-
-                if has_face:
-                    tile_region = result_img.crop((tile_l, tile_t, tile_r, tile_b))
-                    small_tile = tile_region.resize((1, 1), resample=Image.Resampling.NEAREST)
-                    mosaic_tile = small_tile.resize((tile_r - tile_l, tile_b - tile_t), resample=Image.Resampling.NEAREST)
-                    result_img.paste(mosaic_tile, (tile_l, tile_t))
-        return result_img
-
-    # --- 通常マスキングスタイル ---
-    for item in items:
-        bx, by, bw, bh = item["box"]
-        polygon = item["polygon"]
-
-        left = max(0, min(img_w - 1, int(bx)))
-        top = max(0, min(img_h - 1, int(by)))
-        right = max(0, min(img_w - 1, int(bx + bw)))
-        bottom = max(0, min(img_h - 1, int(by + bh)))
-        box_w, box_h = right - left, bottom - top
-
-        if box_w <= 0 or box_h <= 0:
-            continue
-
-        cx, cy = left + box_w / 2, top + box_h / 2
-
-        masked_layer = result_img.copy()
-
-        if mask_type == "ピクセルモザイク":
-            box_region = result_img.crop((left, top, right, bottom))
-            small_box = box_region.resize((max(1, box_w // mosaic_size), max(1, box_h // mosaic_size)), resample=Image.Resampling.NEAREST)
-            mosaic_box = small_box.resize((box_w, box_h), resample=Image.Resampling.NEAREST)
-            masked_layer.paste(mosaic_box, (left, top))
-
-        elif mask_type == "ぼかし（ブラー）":
-            box_region = result_img.crop((left, top, right, bottom))
-            masked_layer.paste(box_region.filter(ImageFilter.GaussianBlur(radius=blur_radius)), (left, top))
-
-        elif mask_type == "塗りつぶし（カラー指定）":
-            draw_layer = ImageDraw.Draw(masked_layer)
-            draw_layer.rectangle([left, top, right, bottom], fill=fill_color)
-
-        elif mask_type == "絵文字スタンプ":
-            target_size = max(int(max(box_w, box_h) * 0.9), min(int(max(box_w, box_h) * 1.15 * (emoji_scale / 100.0)), int(max(box_w, box_h) * 2.2)))
-            emoji_img = create_cropped_emoji_image(emoji_char, target_size=target_size)
-            if emoji_angle != 0:
-                emoji_img = emoji_img.rotate(-emoji_angle, expand=True, resample=Image.Resampling.BICUBIC)
-            ew, eh = emoji_img.size
-            result_img.paste(emoji_img, (int(cx - ew / 2 + offset_x), int(cy - eh / 2 + offset_y)), emoji_img)
-            continue
-
-        if mask_shape == "顔の形（輪郭に沿う）" and len(polygon) >= 3:
-            mask_img = Image.new("L", (img_w, img_h), 0)
-            draw_mask = ImageDraw.Draw(mask_img)
-            draw_mask.polygon(polygon, fill=255)
-            result_img = Image.composite(masked_layer, result_img, mask_img)
-        else:
-            result_img = masked_layer
-
-    return result_img
-
-
-# -------------------------------------------------------------------
-# 6. メイン画面レイアウト
-# -------------------------------------------------------------------
-uploaded_file = st.file_uploader(
-    "群衆・交差点の写真をアップロードしてください (JPEG, PNG, WEBP, BMP)",
-    type=["jpg", "jpeg", "png", "webp", "bmp"],
-)
-
-if uploaded_file is not None:
-    current_file_id = f"{uploaded_file.name}_{uploaded_file.size}"
-    if st.session_state.file_id != current_file_id:
-        st.session_state.file_id = current_file_id
-        st.session_state.boxes = None
-        st.session_state.confirmed = False
-
-    input_image = Image.open(uploaded_file).convert("RGB")
-
-    if st.button("🚀 ローカル AI で限界突破解析を開始", type="primary"):
-        if not mask_targets:
-            st.warning("⚠️ 「マスク対象」を少なくとも1つ選択してください。")
-        else:
-            if precision_level == "限界突破（スクランブル交差点・極限群衆）":
-                st.info("⚠️ 【限界突破モード】 画像を最大64分割し、50%重ね合わせながら超拡大ピラミッドスキャンを行います。")
-
-            with st.spinner("AIが指定された精度モードで画像をフル解析中..."):
-                try:
-                    st.session_state.boxes = get_mask_boxes_locally(
-                        input_image,
-                        mask_targets,
-                        scan_key=scan_mode_key,
-                        grids=grid_levels,
-                        scale_factor=scale_up_factor,
-                        conf_thresh=conf_threshold,
-                        min_size=min_face_size,
-                        dup_thresh=dup_thresh,
-                        max_faces=max_faces_limit,
-                        apply_enhance=use_clahe
+                results_boxes.append(
+                    (
+                        x,
+                        y,
+                        w,
+                        h
                     )
-                    st.session_state.confirmed = False
-                    if not st.session_state.boxes:
-                        st.info("顔が検出されませんでした。別の画像をお試しください。")
-                    else:
-                        st.success(f"解析成功！ 「{precision_level}」モードで {len(st.session_state.boxes)} 箇所の部位を検出しました。")
-                except Exception as e:
-                    st.error(f"解析エラーが発生しました: {e}\n\n{traceback.format_exc()}")
+                )
 
-    if st.session_state.boxes is not None:
-        processed_image = apply_masking(
-            input_image,
-            st.session_state.boxes,
-            mask_shape,
+            except Exception:
+                continue
+
+    except Exception:
+
+        st.error(
+            f"FaceDetectorエラー\n\n"
+            f"{traceback.format_exc()}"
+        )
+
+    return results_boxes
+
+# =====================================================
+# FACE DETECTOR DRAW
+# =====================================================
+
+def draw_detector_boxes(
+    image,
+    boxes
+):
+
+    preview = image.copy()
+
+    draw = ImageDraw.Draw(
+        preview
+    )
+
+    for (
+        x,
+        y,
+        w,
+        h
+    ) in boxes:
+
+        draw.rectangle(
+            [
+                x,
+                y,
+                x + w,
+                y + h
+            ],
+            outline="red",
+            width=3
+        )
+
+    return preview
+
+# =====================================================
+# FACE DETECTOR TEST
+# =====================================================
+
+def run_detector_preview(
+    image
+):
+
+    boxes = detect_faces_detector(
+        image
+    )
+
+    preview = draw_detector_boxes(
+        image,
+        boxes
+    )
+
+    st.image(
+        preview,
+        caption=
+        f"FaceDetector 検出数 : {len(boxes)}"
+    )
+
+    return boxes
+# =====================================================
+# FACELANDMARKER ENGINE
+# =====================================================
+
+def detect_faces_landmarker(
+    image
+):
+
+    faces = []
+
+    try:
+
+        mp_image = to_mp_image(
+            image
+        )
+
+        result = (
+            landmarker.detect(
+                mp_image
+            )
+        )
+
+        if (
+            result is None
+            or
+            result.face_landmarks is None
+        ):
+            return []
+
+        img_w = image.width
+        img_h = image.height
+
+        for face_landmarks in (
+            result.face_landmarks
+        ):
+
+            pts = []
+
+            for lm in face_landmarks:
+
+                x = int(
+                    lm.x * img_w
+                )
+
+                y = int(
+                    lm.y * img_h
+                )
+
+                pts.append(
+                    (x, y)
+                )
+
+            faces.append(
+                pts
+            )
+
+    except Exception:
+
+        st.error(
+            f"FaceLandmarkerエラー\n\n"
+            f"{traceback.format_exc()}"
+        )
+
+    return faces
+
+# =====================================================
+# LANDMARK TO BOX
+# =====================================================
+
+def landmark_to_box(
+    face_points
+):
+
+    xs = [
+        p[0]
+        for p in face_points
+    ]
+
+    ys = [
+        p[1]
+        for p in face_points
+    ]
+
+    x1 = min(xs)
+    y1 = min(ys)
+
+    x2 = max(xs)
+    y2 = max(ys)
+
+    return (
+        x1,
+        y1,
+        x2 - x1,
+        y2 - y1
+    )
+
+# =====================================================
+# LANDMARK BOXES
+# =====================================================
+
+def landmark_boxes(
+    landmark_faces
+):
+
+    boxes = []
+
+    for face in landmark_faces:
+
+        box = landmark_to_box(
+            face
+        )
+
+        boxes.append(
+            box
+        )
+
+    return boxes
+
+# =====================================================
+# LANDMARK DRAW
+# =====================================================
+
+def draw_landmarks(
+    image,
+    landmark_faces,
+    point_radius=1
+):
+
+    preview = image.copy()
+
+    draw = ImageDraw.Draw(
+        preview
+    )
+
+    for face in landmark_faces:
+
+        for x, y in face:
+
+            draw.ellipse(
+                (
+                    x - point_radius,
+                    y - point_radius,
+                    x + point_radius,
+                    y + point_radius
+                ),
+                fill="lime"
+            )
+
+    return preview
+
+# =====================================================
+# LANDMARK TEST
+# =====================================================
+
+def run_landmark_preview(
+    image
+):
+
+    faces = detect_faces_landmarker(
+        image
+    )
+
+    preview = draw_landmarks(
+        image,
+        faces
+    )
+
+    st.image(
+        preview,
+        caption=
+        f"Landmark Face Count : {len(faces)}"
+    )
+
+    return faces
+
+# =====================================================
+# FACE HULL POLYGON
+# =====================================================
+
+def create_face_polygon(
+    face_points
+):
+
+    if (
+        face_points is None
+        or
+        len(face_points) < 3
+    ):
+        return []
+
+    pts_np = np.array(
+        face_points,
+        dtype=np.int32
+    )
+
+    hull = cv2.convexHull(
+        pts_np
+    )
+
+    polygon = []
+
+    for pt in (
+        hull.reshape(-1, 2)
+    ):
+
+        polygon.append(
+            (
+                int(pt[0]),
+                int(pt[1])
+            )
+        )
+
+    return polygon
+
+# =====================================================
+# FACIAL FEATURE INDICES
+# =====================================================
+
+RIGHT_EYE = [
+    33,
+    133,
+    160,
+    159,
+    158,
+    144,
+    145,
+    153
+]
+
+LEFT_EYE = [
+    362,
+    263,
+    387,
+    386,
+    385,
+    373,
+    374,
+    380
+]
+
+NOSE = [
+    1,
+    2,
+    98,
+    327,
+    278,
+    48
+]
+
+MOUTH = [
+    61,
+    291,
+    37,
+    267,
+    0,
+    17,
+    18,
+    14,
+    87,
+    317
+]
+
+# =====================================================
+# GENERIC FEATURE POLYGON
+# =====================================================
+
+def create_feature_polygon(
+    face_points,
+    indices
+):
+
+    pts = []
+
+    for idx in indices:
+
+        if idx < len(face_points):
+
+            pts.append(
+                face_points[idx]
+            )
+
+    if len(pts) < 3:
+
+        return []
+
+    pts_np = np.array(
+        pts,
+        dtype=np.int32
+    )
+
+    hull = cv2.convexHull(
+        pts_np
+    )
+
+    polygon = []
+
+    for pt in (
+        hull.reshape(-1, 2)
+    ):
+
+        polygon.append(
+            (
+                int(pt[0]),
+                int(pt[1])
+            )
+        )
+
+    return polygon
+
+# =====================================================
+# FACE POLYGON
+# =====================================================
+
+def get_face_polygon(
+    face_points
+):
+
+    return create_face_polygon(
+        face_points
+    )
+
+# =====================================================
+# RIGHT EYE
+# =====================================================
+
+def get_right_eye_polygon(
+    face_points
+):
+
+    return create_feature_polygon(
+        face_points,
+        RIGHT_EYE
+    )
+
+# =====================================================
+# LEFT EYE
+# =====================================================
+
+def get_left_eye_polygon(
+    face_points
+):
+
+    return create_feature_polygon(
+        face_points,
+        LEFT_EYE
+    )
+
+# =====================================================
+# BOTH EYES
+# =====================================================
+
+def get_both_eyes_polygons(
+    face_points
+):
+
+    return [
+        get_right_eye_polygon(
+            face_points
+        ),
+
+        get_left_eye_polygon(
+            face_points
+        )
+    ]
+
+# =====================================================
+# NOSE
+# =====================================================
+
+def get_nose_polygon(
+    face_points
+):
+
+    return create_feature_polygon(
+        face_points,
+        NOSE
+    )
+
+
+def get_mouth_polygon(
+    face_points
+):
+
+    return create_feature_polygon(
+        face_points,
+        MOUTH
+    )
+
+# =====================================================
+# POLYGON MASK ENGINE
+# =====================================================
+
+def create_polygon_mask(
+    image_size,
+    polygon
+):
+
+    mask = Image.new(
+        "L",
+        image_size,
+        0
+    )
+
+    draw = ImageDraw.Draw(
+        mask
+    )
+
+    draw.polygon(
+        polygon,
+        fill=255
+    )
+
+    return mask
+
+# =====================================================
+# POLYGON MOSAIC
+# =====================================================
+
+def apply_polygon_mosaic(
+    image,
+    polygon,
+    mosaic_size=15
+):
+
+    mask = create_polygon_mask(
+        image.size,
+        polygon
+    )
+
+    x, y, w, h = polygon_bbox(
+        polygon
+    )
+
+    if (
+        w <= 0
+        or
+        h <= 0
+    ):
+        return image
+
+    result = image.copy()
+
+    region = image.crop(
+        (
+            x,
+            y,
+            x + w,
+            y + h
+        )
+    )
+
+    small = region.resize(
+        (
+            max(1, w // mosaic_size),
+            max(1, h // mosaic_size)
+        ),
+        Image.Resampling.NEAREST
+    )
+
+    mosaic_region = small.resize(
+        (
+            w,
+            h
+        ),
+        Image.Resampling.NEAREST
+    )
+
+    mosaic_layer = image.copy()
+
+    mosaic_layer.paste(
+        mosaic_region,
+        (x, y)
+    )
+
+    return Image.composite(
+        mosaic_layer,
+        result,
+        mask
+    )
+
+# =====================================================
+# POLYGON BLUR
+# =====================================================
+
+def apply_polygon_blur(
+    image,
+    polygon,
+    blur_radius=20
+):
+
+    mask = create_polygon_mask(
+        image.size,
+        polygon
+    )
+
+    blurred = image.filter(
+        ImageFilter.GaussianBlur(
+            blur_radius
+        )
+    )
+
+    return Image.composite(
+        blurred,
+        image,
+        mask
+    )
+
+# =====================================================
+# POLYGON FILL
+# =====================================================
+
+def apply_polygon_fill(
+    image,
+    polygon,
+    fill_color="#000000"
+):
+
+    layer = image.copy()
+
+    draw = ImageDraw.Draw(
+        layer
+    )
+
+    draw.polygon(
+        polygon,
+        fill=fill_color
+    )
+
+    mask = create_polygon_mask(
+        image.size,
+        polygon
+    )
+
+    return Image.composite(
+        layer,
+        image,
+        mask
+    )
+
+# =====================================================
+# POLYGON CENTER
+# =====================================================
+
+def polygon_center(
+    polygon
+):
+
+    xs = [
+        p[0]
+        for p in polygon
+    ]
+
+    ys = [
+        p[1]
+        for p in polygon
+    ]
+
+    return (
+        int(sum(xs) / len(xs)),
+        int(sum(ys) / len(ys))
+    )
+
+# =====================================================
+# POLYGON MASK DISPATCHER
+# =====================================================
+
+def apply_polygon_mask(
+    image,
+    polygon,
+    mask_type,
+    mosaic_size=15,
+    blur_radius=20,
+    fill_color="#000000"
+):
+
+    if len(polygon) < 3:
+        return image
+
+    if mask_type == "モザイク":
+
+        return apply_polygon_mosaic(
+            image,
+            polygon,
+            mosaic_size
+        )
+
+    elif mask_type == "ブラー":
+
+        return apply_polygon_blur(
+            image,
+            polygon,
+            blur_radius
+        )
+
+    elif mask_type == "塗りつぶし":
+
+        return apply_polygon_fill(
+            image,
+            polygon,
+            fill_color
+        )
+
+    return image
+
+# =====================================================
+# MULTI POLYGON APPLY
+# =====================================================
+
+def apply_polygon_masks(
+    image,
+    polygons,
+    mask_type,
+    mosaic_size=15,
+    blur_radius=20,
+    fill_color="#000000"
+):
+
+    result = image.copy()
+
+    for polygon in polygons:
+
+        result = apply_polygon_mask(
+            result,
+            polygon,
             mask_type,
-            grid_size,
             mosaic_size,
             blur_radius,
-            fill_color,
-            offset_x,
-            offset_y,
+            fill_color
+        )
+
+    return result
+
+# =====================================================
+# POLYGON DEBUG VIEW
+# =====================================================
+
+def debug_polygon_preview(
+    image,
+    polygons
+):
+
+    preview = image.copy()
+
+    draw = ImageDraw.Draw(
+        preview
+    )
+
+    for polygon in polygons:
+
+        draw.polygon(
+            polygon,
+            outline="lime",
+            width=3
+        )
+
+    return preview
+
+# =====================================================
+# EMOJI ENGINE
+# =====================================================
+
+def get_emoji_font(
+    font_size
+):
+
+    font_candidates = [
+
+        "seguiemj.ttf",
+
+        "NotoColorEmoji.ttf",
+
+        "Apple Color Emoji.ttc",
+
+        "arial.ttf"
+
+    ]
+
+    for font_name in font_candidates:
+
+        try:
+
+            return ImageFont.truetype(
+                font_name,
+                font_size
+            )
+
+        except Exception:
+            pass
+
+    return ImageFont.load_default()
+
+# =====================================================
+# CREATE EMOJI IMAGE
+# =====================================================
+def create_emoji_image(
+    emoji_char,
+    target_size
+):
+
+    canvas_size = max(
+        256,
+        target_size * 2
+    )
+
+    img = Image.new(
+        "RGBA",
+        (
+            canvas_size,
+            canvas_size
+        ),
+        (
+            0,
+            0,
+            0,
+            0
+        )
+    )
+
+    draw = ImageDraw.Draw(
+        img
+    )
+
+    font = get_emoji_font(
+        int(
+            canvas_size * 0.7
+        )
+    )
+
+    try:
+
+        draw.text(
+            (
+                canvas_size // 2,
+                canvas_size // 2
+            ),
+            emoji_char,
+            font=font,
+            anchor="mm",
+            embedded_color=True
+        )
+
+    except Exception:
+
+        draw.text(
+            (
+                canvas_size // 2,
+                canvas_size // 2
+            ),
+            emoji_char,
+            font=font,
+            anchor="mm",
+            fill="black"
+        )
+
+    bbox = img.getbbox()
+
+    if bbox:
+
+        img = img.crop(
+            bbox
+        )
+
+    return img.resize(
+        (
+            target_size,
+            target_size
+        ),
+        Image.Resampling.LANCZOS
+    )
+# =====================================================
+# TILE MOSAIC ENGINE
+# =====================================================
+
+def box_intersects_tile(
+    box,
+    tile
+):
+
+    bx, by, bw, bh = box
+
+    tx1, ty1, tx2, ty2 = tile
+
+    return (
+
+        max(
+            bx,
+            tx1
+        )
+
+        <
+
+        min(
+            bx + bw,
+            tx2
+        )
+
+    ) and (
+
+        max(
+            by,
+            ty1
+        )
+
+        <
+
+        min(
+            by + bh,
+            ty2
+        )
+
+    )
+
+# =====================================================
+# POLYGON TO BOX
+# =====================================================
+
+def polygon_to_box(
+    polygon
+):
+
+    if len(polygon) < 3:
+
+        return (
+            0,
+            0,
+            0,
+            0
+        )
+
+    xs = [
+        p[0]
+        for p in polygon
+    ]
+
+    ys = [
+        p[1]
+        for p in polygon
+    ]
+
+    return (
+        min(xs),
+        min(ys),
+        max(xs) - min(xs),
+        max(ys) - min(ys)
+    )
+
+# =====================================================
+# TILE MOSAIC
+# =====================================================
+
+def apply_tile_mosaic(
+    image,
+    polygons,
+    grid_size=30
+):
+
+    result = image.copy()
+
+    img_w, img_h = image.size
+
+    target_boxes = []
+
+    for polygon in polygons:
+
+        target_boxes.append(
+            polygon_to_box(
+                polygon
+            )
+        )
+
+    for gx in range(
+        0,
+        img_w,
+        grid_size
+    ):
+
+        for gy in range(
+            0,
+            img_h,
+            grid_size
+        ):
+
+            tile_left = gx
+
+            tile_top = gy
+
+            tile_right = min(
+                img_w,
+                gx + grid_size
+            )
+
+            tile_bottom = min(
+                img_h,
+                gy + grid_size
+            )
+
+            tile = (
+                tile_left,
+                tile_top,
+                tile_right,
+                tile_bottom
+            )
+
+            hit = False
+
+            for box in target_boxes:
+
+                if box_intersects_tile(
+                    box,
+                    tile
+                ):
+
+                    hit = True
+                    break
+
+            if not hit:
+                continue
+
+            tile_region = result.crop(
+                (
+                    tile_left,
+                    tile_top,
+                    tile_right,
+                    tile_bottom
+                )
+            )
+
+            small = tile_region.resize(
+                (
+                    1,
+                    1
+                ),
+                Image.Resampling.NEAREST
+            )
+
+            mosaic = small.resize(
+                (
+                    tile_right - tile_left,
+                    tile_bottom - tile_top
+                ),
+                Image.Resampling.NEAREST
+            )
+
+            result.paste(
+                mosaic,
+                (
+                    tile_left,
+                    tile_top
+                )
+            )
+
+    return result
+
+# =====================================================
+# TILE MOSAIC SETTINGS
+# =====================================================
+
+def get_tile_mosaic_settings():
+
+    grid_size = st.sidebar.slider(
+        "タイルサイズ",
+        10,
+        120,
+        30,
+        5
+    )
+
+    return grid_size
+
+# =====================================================
+# TILE MOSAIC DISPATCHER
+# =====================================================
+
+def apply_tile_mask(
+    image,
+    polygons
+):
+
+    grid_size = (
+        get_tile_mosaic_settings()
+    )
+
+    return apply_tile_mosaic(
+        image,
+        polygons,
+        grid_size
+    )
+
+# =====================================================
+# TILE DEBUG DRAW
+# =====================================================
+
+def draw_tile_grid(
+    image,
+    grid_size
+):
+
+    preview = image.copy()
+
+    draw = ImageDraw.Draw(
+        preview
+    )
+
+    img_w, img_h = image.size
+
+    for x in range(
+        0,
+        img_w,
+        grid_size
+    ):
+
+        draw.line(
+            (
+                x,
+                0,
+                x,
+                img_h
+            ),
+            fill="lime",
+            width=1
+        )
+
+    for y in range(
+        0,
+        img_h,
+        grid_size
+    ):
+
+        draw.line(
+            (
+                0,
+                y,
+                img_w,
+                y
+            ),
+            fill="lime",
+            width=1
+        )
+
+    return preview
+
+# =====================================================
+# TILE MOSAIC PREVIEW
+# =====================================================
+
+def tile_mosaic_preview(
+    image,
+    polygons
+):
+
+    grid_size = (
+        get_tile_mosaic_settings()
+    )
+
+    result = apply_tile_mosaic(
+        image,
+        polygons,
+        grid_size
+    )
+
+    return result
+
+# =====================================================
+# IOU ENGINE
+# =====================================================
+
+def calculate_iou(
+    box1,
+    box2
+):
+
+    x1, y1, w1, h1 = box1
+    x2, y2, w2, h2 = box2
+
+    xa = max(
+        x1,
+        x2
+    )
+
+    ya = max(
+        y1,
+        y2
+    )
+
+    xb = min(
+        x1 + w1,
+        x2 + w2
+    )
+
+    yb = min(
+        y1 + h1,
+        y2 + h2
+    )
+
+    intersection = (
+
+        max(
+            0,
+            xb - xa
+        )
+
+        *
+
+        max(
+            0,
+            yb - ya
+        )
+
+    )
+
+    if intersection <= 0:
+
+        return 0.0
+
+    union = (
+
+        (w1 * h1)
+
+        +
+
+        (w2 * h2)
+
+        -
+
+        intersection
+
+    )
+
+    if union <= 0:
+
+        return 0.0
+
+    return (
+        intersection
+        /
+        union
+    )
+
+# =====================================================
+# BOX CENTER
+# =====================================================
+
+def box_center(
+    box
+):
+
+    x, y, w, h = box
+
+    return (
+
+        x + (w / 2),
+
+        y + (h / 2)
+
+    )
+
+# =====================================================
+# CENTER DISTANCE
+# =====================================================
+
+def center_distance(
+    box1,
+    box2
+):
+
+    cx1, cy1 = box_center(
+        box1
+    )
+
+    cx2, cy2 = box_center(
+        box2
+    )
+
+    return math.sqrt(
+
+        (
+            cx1 - cx2
+        ) ** 2
+
+        +
+
+        (
+            cy1 - cy2
+        ) ** 2
+
+    )
+
+# =====================================================
+# SIZE SIMILARITY
+# =====================================================
+
+def size_similarity(
+    box1,
+    box2
+):
+
+    _, _, w1, h1 = box1
+    _, _, w2, h2 = box2
+
+    area1 = w1 * h1
+    area2 = w2 * h2
+
+    if (
+        area1 <= 0
+        or
+        area2 <= 0
+    ):
+
+        return 0.0
+
+    return (
+
+        min(
+            area1,
+            area2
+        )
+
+        /
+
+        max(
+            area1,
+            area2
+        )
+
+    )
+
+# =====================================================
+# DUPLICATE SCORE
+# =====================================================
+
+def duplicate_score(
+    box1,
+    box2
+):
+
+    iou = calculate_iou(
+        box1,
+        box2
+    )
+
+    dist = center_distance(
+        box1,
+        box2
+    )
+
+    scale = size_similarity(
+        box1,
+        box2
+    )
+
+    dist_score = (
+
+        1.0
+
+        /
+
+        (
+
+            1.0
+
+            +
+
+            dist / 50.0
+
+        )
+
+    )
+
+    score = (
+
+        iou * 0.50
+
+        +
+
+        dist_score * 0.30
+
+        +
+
+        scale * 0.20
+
+    )
+
+    return score
+
+# =====================================================
+# DUPLICATE CHECK
+# =====================================================
+
+def is_duplicate_box(
+    new_box,
+    existing_boxes,
+    threshold=0.55
+):
+
+    for box in existing_boxes:
+
+        score = duplicate_score(
+            new_box,
+            box
+        )
+
+        if score >= threshold:
+
+            return True
+
+    return False
+
+# =====================================================
+# REMOVE DUPLICATES
+# =====================================================
+
+def remove_duplicate_boxes(
+    boxes,
+    threshold=0.55
+):
+
+    unique_boxes = []
+
+    for box in boxes:
+
+        if not is_duplicate_box(
+            box,
+            unique_boxes,
+            threshold
+        ):
+
+            unique_boxes.append(
+                box
+            )
+
+    return unique_boxes
+
+# =====================================================
+# BEST THRESHOLD
+# =====================================================
+
+def get_duplicate_threshold(
+    precision_mode
+):
+
+    if precision_mode == "AI限界突破":
+
+        return 0.45
+
+    elif precision_mode == "群衆特化":
+
+        return 0.50
+
+    elif precision_mode == "超高精度":
+
+        return 0.55
+
+    return 0.60
+
+# =====================================================
+# IOU MERGE
+# =====================================================
+
+def merge_two_boxes(
+    box1,
+    box2
+):
+
+    x1, y1, w1, h1 = box1
+    x2, y2, w2, h2 = box2
+
+    return (
+
+        int(
+            (x1 + x2) / 2
+        ),
+
+        int(
+            (y1 + y2) / 2
+        ),
+
+        int(
+            (w1 + w2) / 2
+        ),
+
+        int(
+            (h1 + h2) / 2
+        )
+
+    )
+
+# =====================================================
+# GROUP DUPLICATES
+# =====================================================
+
+def group_duplicate_boxes(
+    boxes,
+    threshold=0.55
+):
+
+    groups = []
+
+    for box in boxes:
+
+        found_group = False
+
+        for group in groups:
+
+            for member in group:
+
+                score = duplicate_score(
+                    box,
+                    member
+                )
+
+                if score >= threshold:
+
+                    group.append(
+                        box
+                    )
+
+                    found_group = True
+
+                    break
+
+            if found_group:
+                break
+
+        if not found_group:
+
+            groups.append(
+                [box]
+            )
+
+    return groups
+
+# =====================================================
+# MERGE GROUPS
+# =====================================================
+
+def merge_box_groups(
+    groups
+):
+
+    merged = []
+
+    for group in groups:
+
+        xs = []
+        ys = []
+        ws = []
+        hs = []
+
+        for x, y, w, h in group:
+
+            xs.append(x)
+            ys.append(y)
+            ws.append(w)
+            hs.append(h)
+
+        merged.append(
+
+            (
+                int(np.mean(xs)),
+                int(np.mean(ys)),
+                int(np.mean(ws)),
+                int(np.mean(hs))
+            )
+
+        )
+
+    return merged
+
+# =====================================================
+# FULL IOU DEDUP
+# =====================================================
+
+def deduplicate_boxes(
+    boxes,
+    precision_mode="標準"
+):
+
+    threshold = (
+        get_duplicate_threshold(
+            precision_mode
+        )
+    )
+
+    groups = group_duplicate_boxes(
+        boxes,
+        threshold
+    )
+
+    return merge_box_groups(
+        groups
+    )
+
+# =====================================================
+# CROWD MERGE ENGINE
+# =====================================================
+
+def landmark_to_box(
+    face_points
+):
+
+    xs = [
+        p[0]
+        for p in face_points
+    ]
+
+    ys = [
+        p[1]
+        for p in face_points
+    ]
+
+    return (
+
+        min(xs),
+
+        min(ys),
+
+        max(xs) - min(xs),
+
+        max(ys) - min(ys)
+
+    )
+
+# =====================================================
+# LANDMARK -> BOXES
+# =====================================================
+
+def landmark_faces_to_boxes(
+    landmark_faces
+):
+
+    boxes = []
+
+    for face in landmark_faces:
+
+        try:
+
+            box = landmark_to_box(
+                face
+            )
+
+            boxes.append(
+                box
+            )
+
+        except Exception:
+            pass
+
+    return boxes
+
+# =====================================================
+# FACE QUALITY
+# =====================================================
+
+def face_box_area(
+    box
+):
+
+    _, _, w, h = box
+
+    return max(
+        0,
+        w * h
+    )
+
+# =====================================================
+# BEST BOX SELECTOR
+# =====================================================
+
+def select_best_box(
+    boxes
+):
+
+    if len(boxes) == 0:
+
+        return None
+
+    best_box = boxes[0]
+
+    best_area = face_box_area(
+        best_box
+    )
+
+    for box in boxes[1:]:
+
+        area = face_box_area(
+            box
+        )
+
+        if area > best_area:
+
+            best_area = area
+
+            best_box = box
+
+    return best_box
+
+# =====================================================
+# CROWD DUPLICATE GROUPING
+# =====================================================
+
+def crowd_group_boxes(
+    boxes,
+    threshold=0.50
+):
+
+    groups = []
+
+    for new_box in boxes:
+
+        assigned = False
+
+        for group in groups:
+
+            matched = False
+
+            for existing in group:
+
+                score = duplicate_score(
+                    new_box,
+                    existing
+                )
+
+                if score >= threshold:
+
+                    matched = True
+                    break
+
+            if matched:
+
+                group.append(
+                    new_box
+                )
+
+                assigned = True
+                break
+
+        if not assigned:
+
+            groups.append(
+                [new_box]
+            )
+
+    return groups
+
+# =====================================================
+# CROWD MERGE GROUP
+# =====================================================
+
+def crowd_merge_group(
+    group
+):
+
+    xs = []
+    ys = []
+    ws = []
+    hs = []
+
+    for x, y, w, h in group:
+
+        xs.append(x)
+        ys.append(y)
+        ws.append(w)
+        hs.append(h)
+
+    return (
+
+        int(np.mean(xs)),
+
+        int(np.mean(ys)),
+
+        int(np.mean(ws)),
+
+        int(np.mean(hs))
+
+    )
+
+# =====================================================
+# CROWD MERGE ALL
+# =====================================================
+
+def crowd_merge_boxes(
+    boxes,
+    precision_mode="群衆特化"
+):
+
+    threshold = (
+        get_duplicate_threshold(
+            precision_mode
+        )
+    )
+
+    groups = crowd_group_boxes(
+        boxes,
+        threshold
+    )
+
+    merged_boxes = []
+
+    for group in groups:
+
+        merged_boxes.append(
+
+            crowd_merge_group(
+                group
+            )
+
+        )
+
+    return merged_boxes
+
+# =====================================================
+# HYBRID MERGE
+# =====================================================
+
+def merge_detector_and_landmarker(
+    detector_boxes,
+    landmark_faces,
+    precision_mode="群衆特化"
+):
+
+    landmark_boxes = (
+        landmark_faces_to_boxes(
+            landmark_faces
+        )
+    )
+
+    merged = []
+
+    #
+    # FaceLandmarker優先
+    #
+
+    for box in landmark_boxes:
+
+        merged.append(
+            box
+        )
+
+    #
+    # FaceDetector追加
+    #
+
+    for detector_box in detector_boxes:
+
+        duplicate = False
+
+        for landmark_box in landmark_boxes:
+
+            score = duplicate_score(
+                detector_box,
+                landmark_box
+            )
+
+            if score >= 0.50:
+
+                duplicate = True
+                break
+
+        if not duplicate:
+
+            merged.append(
+                detector_box
+            )
+
+    #
+    # 群衆統合
+    #
+
+    merged = crowd_merge_boxes(
+        merged,
+        precision_mode
+    )
+
+    return merged
+
+# =====================================================
+# LANDMARK/POLYGON MATCH
+# =====================================================
+
+def match_landmarks_to_boxes(
+    landmark_faces,
+    boxes
+):
+
+    matched = []
+
+    landmark_boxes = (
+        landmark_faces_to_boxes(
+            landmark_faces
+        )
+    )
+
+    for box in boxes:
+
+        best_face = None
+
+        best_score = -1
+
+        for idx, face_box in enumerate(
+            landmark_boxes
+        ):
+
+            score = calculate_iou(
+                box,
+                face_box
+            )
+
+            if score > best_score:
+
+                best_score = score
+
+                best_face = idx
+
+        matched.append(
+
+            (
+                box,
+                best_face
+            )
+
+        )
+
+    return matched
+
+# =====================================================
+# CROWD STATISTICS
+# =====================================================
+
+def crowd_statistics(
+    before_count,
+    after_count
+):
+
+    removed = (
+        before_count
+        -
+        after_count
+    )
+
+    return {
+
+        "before":
+        before_count,
+
+        "after":
+        after_count,
+
+        "removed":
+        removed
+
+    }
+
+# =====================================================
+# CROWD DEBUG
+# =====================================================
+
+def show_crowd_debug(
+    raw_boxes,
+    merged_boxes
+):
+
+    stats = crowd_statistics(
+
+        len(raw_boxes),
+
+        len(merged_boxes)
+
+    )
+
+    st.write(
+        f"Raw: {stats['before']}"
+    )
+
+    st.write(
+        f"Merged: {stats['after']}"
+    )
+
+    st.write(
+        f"Removed: {stats['removed']}"
+    )
+
+# =====================================================
+# MULTI SCAN ENGINE
+# =====================================================
+
+SCAN_PRESETS = {
+
+    "高速": {
+        "grids": [1],
+        "angles": [0],
+        "scale": 1.0
+    },
+
+    "標準": {
+        "grids": [1, 2],
+        "angles": [0],
+        "scale": 1.2
+    },
+
+    "超高精度": {
+        "grids": [1, 2, 4, 5],
+        "angles": [0, 15, -15],
+        "scale": 1.8
+    },
+
+    "群衆特化": {
+        "grids": [1, 2, 4, 6, 8],
+        "angles": [0, 15, -15, 30, -30],
+        "scale": 2.5
+    },
+
+    "AI限界突破": {
+        "grids": [1, 2, 4, 6, 8, 10],
+        "angles": [
+            0,
+            15,
+            -15,
+            30,
+            -30,
+            45,
+            -45
+        ],
+        "scale": 3.0
+    }
+}
+
+# ============================================
+# =====================================================
+# HYBRID DETECT ENGINE
+# =====================================================
+
+def hybrid_detect(
+    image,
+    precision_mode="群衆特化"
+):
+    """
+    FaceDetector
+    +
+    FaceLandmarker
+    +
+    Crowd Merge
+    """
+
+    detector_boxes = (
+        detect_faces_detector(
+            image
+        )
+    )
+
+    landmark_faces = (
+        detect_faces_landmarker(
+            image
+        )
+    )
+
+    merged_boxes = (
+        merge_detector_and_landmarker(
+            detector_boxes,
+            landmark_faces,
+            precision_mode
+        )
+    )
+
+    merged_boxes = (
+        deduplicate_boxes(
+            merged_boxes,
+            precision_mode
+        )
+    )
+
+    return (
+        merged_boxes,
+        landmark_faces
+    )
+
+
+# =====================================================
+# HYBRID MULTI SCAN
+# =====================================================
+
+def hybrid_multiscan_detect(
+    image,
+    precision_mode="群衆特化"
+):
+
+    scan_boxes, scan_faces = (
+        run_multi_scan(
+            image,
+            precision_mode
+        )
+    )
+
+    hybrid_boxes, hybrid_faces = (
+        hybrid_detect(
+            image,
+            precision_mode
+        )
+    )
+
+    all_boxes = []
+    all_faces = []
+
+    all_boxes.extend(
+        scan_boxes
+    )
+
+    all_boxes.extend(
+        hybrid_boxes
+    )
+
+    all_faces.extend(
+        scan_faces
+    )
+
+    all_faces.extend(
+        hybrid_faces
+    )
+
+    final_boxes = (
+        crowd_merge_boxes(
+            all_boxes,
+            precision_mode
+        )
+    )
+
+    final_boxes = (
+        deduplicate_boxes(
+            final_boxes,
+            precision_mode
+        )
+    )
+
+    return (
+        final_boxes,
+        all_faces
+    )
+
+
+# =====================================================
+# BOX TO POLYGON
+# =====================================================
+
+def box_to_polygon(
+    box
+):
+
+    x, y, w, h = box
+
+    return [
+        (x, y),
+        (x + w, y),
+        (x + w, y + h),
+        (x, y + h)
+    ]
+
+
+# =====================================================
+# MATCH FACE DATA
+# =====================================================
+
+def build_face_data(
+    boxes,
+    landmark_faces
+):
+
+    matched = (
+        match_landmarks_to_boxes(
+            landmark_faces,
+            boxes
+        )
+    )
+
+    results = []
+
+    for (
+        box,
+        face_index
+    ) in matched:
+
+        face_points = None
+
+        if (
+            face_index is not None
+            and
+            face_index < len(
+                landmark_faces
+            )
+        ):
+
+            face_points = (
+                landmark_faces[
+                    face_index
+                ]
+            )
+
+        results.append(
+            {
+                "box": box,
+                "landmarks": face_points
+            }
+        )
+
+    return results
+
+
+# =====================================================
+# TARGET POLYGONS
+# =====================================================
+
+def build_target_polygons(
+    face_data,
+    mask_target
+):
+
+    polygons = []
+
+    for face in face_data:
+
+        landmarks = (
+            face["landmarks"]
+        )
+
+        if landmarks:
+
+            polygons.extend(
+                get_target_polygons(
+                    landmarks,
+                    mask_target
+                )
+            )
+
+        else:
+
+            polygons.append(
+                box_to_polygon(
+                    face["box"]
+                )
+            )
+
+    return polygons
+
+
+# =====================================================
+# COMPLETE DETECTION PIPELINE
+# =====================================================
+
+def detect_all(
+    image,
+    precision_mode,
+    mask_target
+):
+
+    boxes, faces = (
+        hybrid_multiscan_detect(
+            image,
+            precision_mode
+        )
+    )
+
+    face_data = (
+        build_face_data(
+            boxes,
+            faces
+        )
+    )
+
+    polygons = (
+        build_target_polygons(
+            face_data,
+            mask_target
+        )
+    )
+
+    return (
+        boxes,
+        faces,
+        polygons
+    )
+
+
+# =====================================================
+# DEBUG OVERLAY
+# =====================================================
+
+def draw_detection_overlay(
+    image,
+    boxes,
+    polygons
+):
+
+    preview = image.copy()
+
+    draw = ImageDraw.Draw(
+        preview
+    )
+
+    for x, y, w, h in boxes:
+
+        draw.rectangle(
+            (
+                x,
+                y,
+                x + w,
+                y + h
+            ),
+            outline="red",
+            width=2
+        )
+
+    for polygon in polygons:
+
+        if len(polygon) >= 3:
+
+            draw.polygon(
+                polygon,
+                outline="lime",
+                width=3
+            )
+
+    return preview
+
+
+# =====================================================
+# HYBRID PREVIEW
+# =====================================================
+
+def hybrid_preview(
+    image,
+    precision_mode,
+    mask_target
+):
+
+    (
+        boxes,
+        faces,
+        polygons
+
+    ) = detect_all(
+        image,
+        precision_mode,
+        mask_target
+    )
+
+    preview = draw_detection_overlay(
+        image,
+        boxes,
+        polygons
+    )
+
+    st.image(
+        preview,
+        caption=f"Faces={len(boxes)}  Polygons={len(polygons)}"
+    )
+
+    return (
+        boxes,
+        faces,
+        polygons
+    )
+# =====================================================
+# MAIN MASK DISPATCHER
+# =====================================================
+
+def apply_mask(
+    image,
+    polygons,
+    mask_type,
+    mosaic_size=15,
+    blur_radius=20,
+    fill_color="#000000",
+    emoji_char="🌸",
+    emoji_scale=120,
+    emoji_angle=0,
+    offset_x=0,
+    offset_y=0,
+    tile_size=30
+):
+
+    result = image.copy()
+
+    #
+    # タイルモザイク
+    #
+
+    if mask_type == "タイルモザイク":
+
+        return apply_tile_mosaic(
+            result,
+            polygons,
+            tile_size
+        )
+
+    #
+    # 絵文字
+    #
+
+    if mask_type == "絵文字":
+
+        return apply_emoji_stamps(
+            result,
+            polygons,
             emoji_char,
             emoji_scale,
             emoji_angle,
+            offset_x,
+            offset_y
         )
 
-        st.markdown("---")
-        col_left, col_right = st.columns(2)
-        with col_left:
-            st.subheader("📷 元の画像")
-            st.image(input_image, use_container_width=True)
-        with col_right:
-            st.subheader("🔍 マスキング結果")
-            st.image(processed_image, use_container_width=True)
+    #
+    # ポリゴンベース処理
+    #
 
-        st.markdown("---")
-        confirm_col1, confirm_col2 = st.columns([2, 3])
-        with confirm_col1:
-            if not st.session_state.confirmed:
-                if st.button("✅ これで決定", type="primary", use_container_width=True):
-                    st.session_state.confirmed = True
-                    st.rerun()
-            else:
-                st.success("✨ 位置とデザインが確定しました！")
-                if st.button("🔄 もう一度微調整する", use_container_width=True):
-                    st.session_state.confirmed = False
-                    st.rerun()
-        with confirm_col2:
-            if st.session_state.confirmed:
-                buf = io.BytesIO()
-                processed_image.save(buf, format="PNG")
-                st.download_button(
-                    label="💾 加工画像をダウンロード",
-                    data=buf.getvalue(),
-                    file_name="crowd_masked.png",
-                    mime="image/png",
-                    use_container_width=True,
-                    type="primary",
+    for polygon in polygons:
+
+        if len(polygon) < 3:
+            continue
+
+
+# =====================================================
+# MAIN
+# =====================================================
+
+def main():
+
+    st.sidebar.title(
+        "AI Smart Masking Pro"
+    )
+
+    precision_mode = st.sidebar.selectbox(
+        "検出モード",
+        [
+            "高速",
+            "標準",
+            "超高精度",
+            "群衆特化",
+            "AI限界突破"
+        ],
+        index=3
+    )
+
+    mask_target = st.sidebar.selectbox(
+        "マスク対象",
+        [
+            "顔全体",
+            "両目",
+            "右目",
+            "左目",
+            "鼻",
+            "口"
+        ]
+    )
+
+    uploaded_file = st.file_uploader(
+        "画像を選択してください",
+        type=[
+            "jpg",
+            "jpeg",
+            "png",
+            "bmp",
+            "webp"
+        ]
+    )
+
+    if uploaded_file is None:
+
+        st.info(
+            "画像をアップロードしてください"
+        )
+
+        return
+
+    try:
+
+        image = Image.open(
+            uploaded_file
+        ).convert(
+            "RGB"
+        )
+
+    except Exception:
+
+        st.error(
+            "画像を読み込めませんでした"
+        )
+
+        return
+
+    st.image(
+        image,
+        caption="元画像",
+    )
+
+    run_masking_ui(
+        image,
+        precision_mode,
+        mask_target
+    )
+def run_masking_ui(
+    image,
+    precision_mode,
+    mask_target
+):
+
+    if st.button(
+        "🚀 解析開始"
+    ):
+
+        with st.spinner(
+            "解析中..."
+        ):
+
+            boxes, faces, polygons = detect_all(
+                image,
+                precision_mode,
+                mask_target
+            )
+
+            result = apply_mask(
+                image=image,
+                polygons=polygons,
+                mask_type="モザイク",
+                mosaic_size=15
+            )
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+
+                st.subheader(
+                    "元画像"
                 )
-else:
-    st.info("👆 写真ファイルをアップロードして「🚀 ローカル AI で限界突破解析を開始」をクリックしてください。")
+
+                st.image(image)
+
+            with col2:
+
+                st.subheader(
+                    "結果"
+                )
+
+                st.image(result)
+
+            st.success(
+                f"検出数: {len(boxes)}"
+            )
+
+# =====================================================
+# ENTRY POINT
+# =====================================================
+
+if __name__ == "__main__":
+
+    try:
+
+        main()
+
+    except Exception:
+
+        st.error(
+
+            "予期しないエラーが発生しました"
+
+        )
+
+        st.code(
+            traceback.format_exc()
+        )
