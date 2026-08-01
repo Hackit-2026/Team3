@@ -13,21 +13,27 @@ st.set_page_config(
 )
 
 st.title("🛡️ 完全ローカル AI スマートマスキング WebApp")
-st.caption("通信なし・完全オフライン動作。MediaPipe 1.0.0 完全対応。群衆・極小顔まで超精密スキャンします。")
+st.caption("通信なし・完全オフライン動作。MediaPipe自動適応版。群衆・極小顔まで超精密スキャンします。")
 
 
-# --- MediaPipe モジュールの安全ロード (1.0.0 / 0.10.x 双方対応) ---
+# --- MediaPipe モジュールの完全自動適応ロード ---
 @st.cache_resource
 def load_mediapipe_models():
     try:
         import mediapipe as mp
-        # solutions パッケージの安全取得
+        # パターン1: 標準的な mp.solutions が使える場合 (推奨)
         if hasattr(mp, "solutions"):
             return mp.solutions.face_mesh, mp.solutions.face_detection
-        else:
-            import mediapipe.python.solutions.face_mesh as mp_face_mesh
-            import mediapipe.python.solutions.face_detection as mp_face_detection
-            return mp_face_mesh, mp_face_detection
+        
+        # パターン2: python.solutions からインポートを試みる場合
+        try:
+            import mediapipe.python.solutions.face_mesh as mp_fm
+            import mediapipe.python.solutions.face_detection as mp_fd
+            return mp_fm, mp_fd
+        except Exception:
+            pass
+
+        return None, None
     except Exception as e:
         st.error(f"MediaPipeの読み込みに失敗しました: {e}")
         return None, None
@@ -315,7 +321,7 @@ def get_mask_boxes_locally(
     apply_enhance: bool = False
 ):
     if mp_face_mesh is None or mp_face_detection is None:
-        st.error("MediaPipeが正常に読み込まれていません。")
+        st.error("MediaPipeの読み込みに失敗しました。ライブラリのバージョンが異なる可能性があります。")
         return []
 
     original_np = np.array(image)
@@ -456,7 +462,7 @@ def get_mask_boxes_locally(
         except Exception:
             pass
 
-        # --- 2. 遠距離・高密度専用 Face Detection バックアップ ---
+        # --- 2. 遠距離専用 Face Detection バックアップ ---
         try:
             with mp_face_detection.FaceDetection(
                 model_selection=1,
