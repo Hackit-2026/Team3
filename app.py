@@ -13,29 +13,33 @@ st.set_page_config(
 )
 
 st.title("🛡️ 完全ローカル AI スマートマスキング WebApp")
-st.caption("通信なし・完全オフライン動作。MediaPipe自動適応版。群衆・極小顔まで超精密スキャンします。")
+st.caption("通信なし・完全オフライン動作。詳細エラー診断機能付き。")
 
 
-# --- MediaPipe モジュールの完全自動適応ロード ---
+# --- MediaPipe モジュールの詳細診断ロード ---
 @st.cache_resource
 def load_mediapipe_models():
     try:
         import mediapipe as mp
-        # パターン1: 標準的な mp.solutions が使える場合 (推奨)
-        if hasattr(mp, "solutions"):
-            return mp.solutions.face_mesh, mp.solutions.face_detection
         
-        # パターン2: python.solutions からインポートを試みる場合
-        try:
+        # フォルダ内での誤った同名ファイル作成チェック
+        if __file__ == "cv2.py" or __file__ == "mediapipe.py":
+            st.error("⚠️ 致命的なエラー: フォルダ内に 'cv2.py' または 'mediapipe.py' という名前のファイルが存在します。別の名前に変更してください。")
+            return None, None
+
+        # solutions のロード試行
+        if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_mesh"):
+            return mp.solutions.face_mesh, mp.solutions.face_detection
+        else:
+            # 代替インポート
             import mediapipe.python.solutions.face_mesh as mp_fm
             import mediapipe.python.solutions.face_detection as mp_fd
             return mp_fm, mp_fd
-        except Exception:
-            pass
-
-        return None, None
+            
     except Exception as e:
-        st.error(f"MediaPipeの読み込みに失敗しました: {e}")
+        # 画面上に具体的なエラー原因を表示する
+        error_detail = traceback.format_exc()
+        st.error(f"❌ MediaPipeの読み込みに失敗しました。\n\n**詳細エラー:**\n```text\n{error_detail}\n```")
         return None, None
 
 
@@ -99,7 +103,7 @@ elif precision_level == "超高精度（大人数・密集写真）":
     use_clahe = True
 else:  # 限界突破 (スクランブル交差点・極限群衆)
     scan_mode_key = "群衆特化"
-    grid_levels = [1, 2, 4, 6, 8]  # 最大8x8(64分割)まで多層スキャン
+    grid_levels = [1, 2, 4, 6, 8]
     scale_up_factor = 2.5
     conf_threshold = 0.15
     min_face_size = 2
@@ -210,7 +214,6 @@ def create_cropped_emoji_image(emoji_char: str, target_size: int) -> Image.Image
 
 
 def apply_clahe(img_np):
-    """暗部や輪郭を強調し検出率を上げるCLAHE処理"""
     try:
         lab = cv2.cvtColor(img_np, cv2.COLOR_RGB2LAB)
         l, a, b = cv2.split(lab)
@@ -244,7 +247,6 @@ def get_rotated_image_and_inv_matrix(image_np, angle):
 
 
 def map_points_back(points, M_inv):
-    """四則演算による型安全な座標逆変換"""
     clean_pts = []
     if isinstance(points, np.ndarray):
         try:
@@ -321,7 +323,7 @@ def get_mask_boxes_locally(
     apply_enhance: bool = False
 ):
     if mp_face_mesh is None or mp_face_detection is None:
-        st.error("MediaPipeの読み込みに失敗しました。ライブラリのバージョンが異なる可能性があります。")
+        st.error("MediaPipeが正常に読み込まれていません。")
         return []
 
     original_np = np.array(image)
