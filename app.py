@@ -13,17 +13,28 @@ st.set_page_config(
 )
 
 st.title("🛡️ AI Smart Masking Pro")
-st.caption("通信なし・完全オフライン動作。最大150人の高密度検知 ＆ 壁・天井への誤判定防止フィルター搭載。")
+st.caption("通信なし・完全オフライン動作。最大150人高密度検知 ＆ 誤検知防止フィルター搭載。")
 
 
-# --- MediaPipe 標準モジュールの安全ロード ---
+# --- MediaPipe モジュールの堅牢な安全ロード ---
 @st.cache_resource
 def load_mediapipe_solutions():
     try:
         import mediapipe as mp
-        return mp.solutions.face_mesh, mp.solutions.face_detection
+        # 1. 標準の mp.solutions を試す
+        if hasattr(mp, "solutions"):
+            return mp.solutions.face_mesh, mp.solutions.face_detection
+        
+        # 2. 直接インポートを試す
+        from mediapipe.solutions import face_mesh, face_detection
+        return face_mesh, face_detection
     except Exception as e:
-        st.error(f"MediaPipeの読み込みに失敗しました: {e}")
+        st.error(
+            f"MediaPipeの読み込みに失敗しました: {e}\n\n"
+            "【対処法】もしエラーが解消しない場合は、コマンドプロンプトで以下のコマンドを実行して再インストールをお試しください。\n"
+            "pip uninstall -y mediapipe protobuf\n"
+            "pip install mediapipe protobuf"
+        )
         return None, None
 
 
@@ -83,16 +94,16 @@ elif precision_level == "超高精度（大人数・上限150人）":
     conf_threshold = 0.25
     min_face_size = 6
     dup_thresh = 0.01
-    max_faces_limit = 150  # 150人上限
+    max_faces_limit = 150
     use_clahe = True
 else:  # 限界突破 (スクランブル交差点・高密度150人)
     scan_mode_key = "群衆特化"
-    grid_levels = [1, 2, 4, 6]    # ピラミッドスキャン
-    scale_up_factor = 2.2         # 超拡大
-    conf_threshold = 0.22         # 壁・天井のノイズを拾わない安全なしきい値
-    min_face_size = 5             # 5px以下の点状ノイズを除外
+    grid_levels = [1, 2, 4, 6]
+    scale_up_factor = 2.2
+    conf_threshold = 0.22
+    min_face_size = 5
     dup_thresh = 0.008
-    max_faces_limit = 150         # 150人上限設定
+    max_faces_limit = 150
     use_clahe = True
 
 st.sidebar.markdown("---")
@@ -407,13 +418,11 @@ def get_mask_boxes_locally(
                             # -------------------------------------------------------------
                             # 🛡️ 誤判定防止（壁・天井の模様除外）フィルター
                             # -------------------------------------------------------------
-                            # 両目と口の位置関係チェック（目が上、口が下にあるか）
                             if len(orig_pts_all) >= 468:
                                 eye_r_y = (orig_pts_all[33][1] + orig_pts_all[133][1]) / 2
                                 eye_l_y = (orig_pts_all[362][1] + orig_pts_all[263][1]) / 2
                                 mouth_y = (orig_pts_all[61][1] + orig_pts_all[291][1]) / 2
                                 eye_avg_y = (eye_r_y + eye_l_y) / 2
-                                # 目より口が上にある不自然な構造（天井のライト等）を除外
                                 if mouth_y <= eye_avg_y - 2:
                                     continue
 
@@ -428,11 +437,9 @@ def get_mask_boxes_locally(
 
                                 w_box, h_box = xmax - xmin, ymax - ymin
                                 
-                                # 最小サイズチェック
                                 if w_box < min_size or h_box < min_size:
                                     return
                                 
-                                # アスペクト比チェック（縦横比 0.45〜2.2 以外の細長い壁の目地やライトを除外）
                                 if w_box > 0 and h_box > 0:
                                     aspectRatio = w_box / h_box
                                     if aspectRatio > 2.2 or aspectRatio < 0.45:
@@ -466,7 +473,7 @@ def get_mask_boxes_locally(
         try:
             with mp_face_detection.FaceDetection(
                 model_selection=1,
-                min_detection_confidence=conf_thresh + 0.05 # バックアップは少し厳しめに設定して誤検知カット
+                min_detection_confidence=conf_thresh + 0.05
             ) as face_detector:
 
                 for cx_off, cy_off, cw, ch in crops:
@@ -497,7 +504,6 @@ def get_mask_boxes_locally(
                             if rw < min_size or rh < min_size:
                                 continue
 
-                            # アスペクト比判定（壁や天井の四角を除外）
                             if rw > 0 and rh > 0:
                                 aspectRatio = rw / rh
                                 if aspectRatio > 2.0 or aspectRatio < 0.5:
@@ -531,7 +537,6 @@ def get_mask_boxes_locally(
         except Exception:
             pass
 
-    # 150名上限制限
     if len(detected_items) > max_faces_limit:
         detected_items = detected_items[:max_faces_limit]
 
@@ -559,7 +564,6 @@ def apply_masking(
     result_img = image.copy()
     img_w, img_h = image.size
 
-    # --- タイル状モザイクの場合 ---
     if mask_type == "タイル状モザイク (グリッド)":
         target_rects = [item["box"] for item in items]
         for gx in range(0, img_w, grid_size):
@@ -580,7 +584,6 @@ def apply_masking(
                     result_img.paste(mosaic_tile, (tile_l, tile_t))
         return result_img
 
-    # --- 通常マスキングスタイル ---
     for item in items:
         bx, by, bw, bh = item["box"]
         polygon = item["polygon"]
