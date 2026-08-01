@@ -3,7 +3,7 @@ import os
 import math
 import numpy as np
 import streamlit as st
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageEnhance
 import traceback
 
 # -------------------------------------------------------------------
@@ -14,56 +14,41 @@ st.set_page_config(
 )
 
 st.title("🛡️ AI Smart Masking Pro")
-st.caption("通信なし・完全オフライン。誤検知カット（人骨格・幾何構造検証）フィルタ搭載。")
+st.caption("通信なし・完全オフライン動作。高精度モード自動コントラスト補正搭載。")
 
 # -------------------------------------------------------------------
 # 2. ローカルモデルファイルのロード
 # -------------------------------------------------------------------
 MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mp_models")
 FACE_LANDMARKER_PATH = os.path.join(MODEL_DIR, "face_landmarker.task")
-FACE_DETECTOR_PATH = os.path.join(MODEL_DIR, "blaze_face_short_range.tflite")
 
 if not os.path.exists(FACE_LANDMARKER_PATH):
-    st.error(f"エラー: `{FACE_LANDMARKER_PATH}` が見つかりません。`mp_models` フォルダ内に配置してください。")
+    st.error(f"エラー: `{FACE_LANDMARKER_PATH}` が見つかりません。`mp_models` フォルダ内に `face_landmarker.task` を配置してください。")
     st.stop()
 
 @st.cache_resource
-def load_mediapipe_tasks(min_conf):
+def load_mediapipe_tasks():
     try:
         import mediapipe as mp
         from mediapipe.tasks import python as mp_python
         from mediapipe.tasks.python import vision
-        
-        # 精密ランドマーク用
-        base_options_lm = mp_python.BaseOptions(model_asset_path=FACE_LANDMARKER_PATH)
-        options_lm = vision.FaceLandmarkerOptions(
-            base_options=base_options_lm,
-            running_mode=vision.RunningMode.IMAGE,
-            num_faces=100,
-            min_face_detection_confidence=min_conf,
-            min_face_presence_confidence=min_conf,
-            min_tracking_confidence=min_conf,
-        )
-        landmarker = vision.FaceLandmarker.create_from_options(options_lm)
-        
-        # 高感度検出用（ファイルが存在する場合のみ使用）
-        detector = None
-        if os.path.exists(FACE_DETECTOR_PATH):
-            try:
-                base_options_det = mp_python.BaseOptions(model_asset_path=FACE_DETECTOR_PATH)
-                options_det = vision.FaceDetectorOptions(
-                    base_options=base_options_det,
-                    running_mode=vision.RunningMode.IMAGE,
-                    min_detection_confidence=min_conf + 0.1, # Detectorは誤検知しやすいので高めに設定
-                )
-                detector = vision.FaceDetector.create_from_options(options_det)
-            except Exception:
-                pass
 
-        return mp, landmarker, detector
+        base_options = mp_python.BaseOptions(model_asset_path=FACE_LANDMARKER_PATH)
+        options = vision.FaceLandmarkerOptions(
+            base_options=base_options,
+            running_mode=vision.RunningMode.IMAGE,
+            num_faces=50,
+            min_face_detection_confidence=0.35,
+            min_face_presence_confidence=0.35,
+            min_tracking_confidence=0.35,
+        )
+        landmarker = vision.FaceLandmarker.create_from_options(options)
+        return mp, landmarker
     except Exception as e:
         st.error(f"初期化エラー: {e}")
-        return None, None, None
+        return None, None
+
+mp, landmarker = load_mediapipe_tasks()
 
 # セッション状態の初期化
 if "boxes" not in st.session_state:
@@ -79,42 +64,28 @@ if "file_id" not in st.session_state:
 st.sidebar.header("⚙️ マスク設定")
 st.sidebar.success("🔒 完全ローカルモード")
 
-# 🎯 検出モード選択
-st.sidebar.subheader("🔍 スキャン範囲")
+# 🎯 検出精度選択（コントラスト補正と自動連動）
+st.sidebar.subheader("🔍 検出精度")
 precision_level = st.sidebar.radio(
-    "検出モードを選択",
+    "精度を選択してください",
     [
-        "標準（少人数・大きな顔）",
-        "高精度（集合写真・中人）",
-        "広域スキャン（大人数・遠距離）",
+        "標準（1人〜少人数）",
+        "高精度（集合写真・暗所補正連動）",
+        "超高精度（大人数・広域連動）",
     ],
     index=1,
-    help="服の模様や背景にモザイクがかかる場合は、下の「判定の厳しさ」を上げてください。"
 )
 
-if precision_level == "標準（少人数・大きな顔）":
+# 選択肢に応じて分割数とコントラスト補正を自動割り振り
+if precision_level == "標準（1人〜少人数）":
     grids = [1]
-    scale_up_factor = 1.0
-elif precision_level == "高精度（集合写真・中人）":
+    enable_contrast = False
+elif precision_level == "高精度（集合写真・暗所補正連動）":
+    grids = [1, 2]
+    enable_contrast = True
+else:  # 超高精度
     grids = [1, 2, 3]
-    scale_up_factor = 1.2
-else: # 広域スキャン
-    grids = [1, 2, 4, 5]
-    scale_up_factor = 1.5
-
-# 🛡️ 判定の厳しさ（ユーザー調整スライダー）
-st.sidebar.markdown("---")
-st.sidebar.subheader("🛡️ 誤検知フィルター")
-min_confidence = st.sidebar.slider(
-    "🤖 判定の厳しさ (信頼度閾値)",
-    min_value=0.20,
-    max_value=0.80,
-    value=0.45,
-    step=0.05,
-    help="値を上げると背景や服の「誤判定」が消えます。値を下げると遠くの小さい顔を拾いやすくなります。"
-)
-
-mp, landmarker, detector = load_mediapipe_tasks(min_confidence)
+    enable_contrast = True
 
 st.sidebar.markdown("---")
 
@@ -183,7 +154,7 @@ elif mask_type == "塗りつぶし（カラー指定）":
 
 
 # -------------------------------------------------------------------
-# 4. Pure Python / Pillow 画像処理 ＆ 誤判定検知ユーティリティ
+# 4. Pure Python / Pillow 描画ユーティリティ
 # -------------------------------------------------------------------
 def get_emoji_font(font_size: int):
     font_candidates = ["seguiemj.ttf", "NotoColorEmoji.ttf", "Apple Color Emoji.ttc", "arial.ttf"]
@@ -219,6 +190,7 @@ def create_cropped_emoji_image(emoji_char: str, target_size: int) -> Image.Image
 
 
 def get_polygon_hull_pil(pts):
+    """Convex Hull（輪郭外包ポリゴン）計算"""
     if len(pts) < 3:
         return [(int(p[0]), int(p[1])) for p in pts]
 
@@ -242,99 +214,29 @@ def get_polygon_hull_pil(pts):
     return [(int(p[0]), int(p[1])) for p in hull]
 
 
-def is_human_face_geometry(pts, w, h):
-    """🛡️ 服のシワ・背景の誤認を排除する幾何構造チェック"""
-    # 1. アスペクト比（縦横比）判定：極端に細長かったり横長な領域は排除
-    if h <= 0 or w <= 0:
-        return False
-    aspect_ratio = w / h
-    if aspect_ratio < 0.45 or aspect_ratio > 1.6:
-        return False
+def apply_pillow_contrast(pil_img):
+    """Pillowによるオートコントラスト＆明暗補正"""
+    try:
+        auto_img = ImageOps.autocontrast(pil_img, cutoff=2)
+        enhancer = ImageEnhance.Contrast(auto_img)
+        return enhancer.enhance(1.25)
+    except Exception:
+        return pil_img
 
-    # ランドマークポイントが存在する場合の解剖学的検証
-    if len(pts) >= 468:
-        # 両目のY座標平均
-        eye_r_y = (pts[33][1] + pts[133][1]) / 2.0
-        eye_l_y = (pts[362][1] + pts[263][1]) / 2.0
-        eye_avg_y = (eye_r_y + eye_l_y) / 2.0
-        
-        # 口のY座標平均
-        mouth_y = (pts[61][1] + pts[291][1]) / 2.0
-
-        # 口が目の上に位置するような崩壊した形状（服のシワ等の誤検知）は除外
-        if mouth_y <= eye_avg_y - 2:
-            return False
-
-        # 目の距離と顔の幅の比率判定
-        eye_r_x = (pts[33][0] + pts[133][0]) / 2.0
-        eye_l_x = (pts[362][0] + pts[263][0]) / 2.0
-        eye_dist = math.sqrt((eye_r_x - eye_l_x)**2 + (eye_r_y - eye_l_y)**2)
-        
-        if w > 0:
-            eye_ratio = eye_dist / w
-            # 人間の両目距離/顔幅の比率は通常0.20〜0.55の範囲
-            if eye_ratio < 0.12 or eye_ratio > 0.65:
-                return False
-
-    return True
-
-
-def py_nms(items, iou_threshold=0.35):
-    """重複検出の統合（Non-Maximum Suppression）"""
-    if not items:
-        return []
-
-    scores = np.array([item["score"] for item in items])
-    boxes = np.array([[item["box"][0], item["box"][1], item["box"][0]+item["box"][2], item["box"][1]+item["box"][3]] for item in items])
-
-    x1 = boxes[:, 0]
-    y1 = boxes[:, 1]
-    x2 = boxes[:, 2]
-    y2 = boxes[:, 3]
-    areas = (x2 - x1 + 1) * (y2 - y1 + 1)
-
-    order = scores.argsort()[::-1]
-
-    keep = []
-    while order.size > 0:
-        i = order[0]
-        keep.append(items[i])
-
-        if order.size == 1:
-            break
-
-        xx1 = np.maximum(x1[i], x1[order[1:]])
-        yy1 = np.maximum(y1[i], y1[order[1:]])
-        xx2 = np.minimum(x2[i], x2[order[1:]])
-        yy2 = np.minimum(y2[i], y2[order[1:]])
-
-        w = np.maximum(0.0, xx2 - xx1 + 1)
-        h = np.maximum(0.0, yy2 - yy1 + 1)
-        inter = w * h
-
-        iou = inter / (areas[i] + areas[order[1:]] - inter)
-
-        inds = np.where(iou <= iou_threshold)[0]
-        order = order[inds + 1]
-
-    return keep
 
 # -------------------------------------------------------------------
-# 5. スキャンエンジン（誤検知排除処理組み込み）
+# 5. 顔検出処理（精度選択と補正が完全連動）
 # -------------------------------------------------------------------
-def get_mask_boxes_locally(
-    image: Image.Image,
-    mask_targets: list,
-    grids: list,
-    scale_factor: float = 1.2,
-):
+def get_mask_boxes_locally(image: Image.Image, mask_targets: list, grids: list, enable_contrast: bool = False):
     if landmarker is None:
-        st.error("FaceLandmarkerエンジンの初期化に失敗しています。")
+        st.error("FaceLandmarkerの初期化に失敗しています。")
         return []
 
     orig_w, orig_h = image.size
-    all_raw_items = []
+    detected_items = []
+    processed_centers = []
 
+    # 各パーツのインデックス
     INDEX_RIGHT_EYE = [33, 133, 160, 159, 158, 144, 145, 153]
     INDEX_LEFT_EYE = [362, 263, 387, 386, 385, 373, 374, 380]
     INDEX_NOSE = [1, 2, 98, 327, 278, 48]
@@ -347,8 +249,8 @@ def get_mask_boxes_locally(
             continue
         step_x = orig_w // g
         step_y = orig_h // g
-        overlap_x = int(step_x * 0.30)
-        overlap_y = int(step_y * 0.30)
+        overlap_x = int(step_x * 0.25)
+        overlap_y = int(step_y * 0.25)
 
         for i in range(g):
             for j in range(g):
@@ -358,38 +260,32 @@ def get_mask_boxes_locally(
                 y2 = min(orig_h, (j + 1) * step_y + overlap_y)
                 crops.append((x1, y1, x2 - x1, y2 - y1))
 
-    progress_bar = st.progress(0)
-    num_crops = len(crops)
+    dup_pixel_thresh = min(orig_w, orig_h) * 0.05
 
-    for idx, (cx_off, cy_off, cw, ch) in enumerate(crops):
-        progress_bar.progress(int((idx + 1) / num_crops * 100), text=f"スキャン中... ({idx+1}/{num_crops})")
-        if cw < 15 or ch < 15:
+    for cx_off, cy_off, cw, ch in crops:
+        if cw < 20 or ch < 20:
             continue
 
         crop_pil = image.crop((cx_off, cy_off, cx_off + cw, cy_off + ch))
 
-        if scale_factor > 1.0 and (cw * scale_factor < 4000 and ch * scale_factor < 4000):
-            scaled_crop = crop_pil.resize((int(cw * scale_factor), int(ch * scale_factor)), Image.Resampling.BICUBIC)
-            curr_scale = scale_factor
+        # 精度設定に連動してコントラスト補正を自動適用
+        if enable_contrast:
+            scan_crop_pil = apply_pillow_contrast(crop_pil)
         else:
-            scaled_crop = crop_pil
-            curr_scale = 1.0
+            scan_crop_pil = crop_pil
 
-        crop_np = np.array(scaled_crop)
+        crop_np = np.array(scan_crop_pil)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(crop_np))
 
-        # --- FaceLandmarker (高信頼・精密判定) ---
         try:
-            result_lm = landmarker.detect(mp_image)
-            if result_lm and result_lm.face_landmarks:
-                for face_landmarks in result_lm.face_landmarks:
-                    score = sum([getattr(lm, 'presence', 1.0) for lm in face_landmarks]) / len(face_landmarks)
-                    
+            result = landmarker.detect(mp_image)
+            if result and result.face_landmarks:
+                for face_landmarks in result.face_landmarks:
                     orig_pts_all = []
                     for lm in face_landmarks:
                         lx = getattr(lm, 'x', lm['x'] if isinstance(lm, dict) else 0)
                         ly = getattr(lm, 'y', lm['y'] if isinstance(lm, dict) else 0)
-                        orig_pts_all.append((cx_off + (lx * cw * curr_scale) / curr_scale, cy_off + (ly * ch * curr_scale) / curr_scale))
+                        orig_pts_all.append((cx_off + lx * cw, cy_off + ly * ch))
 
                     if len(orig_pts_all) < 10:
                         continue
@@ -398,110 +294,50 @@ def get_mask_boxes_locally(
                     y_coords = [p[1] for p in orig_pts_all]
                     xmin, xmax = min(x_coords), max(x_coords)
                     ymin, ymax = min(y_coords), max(y_coords)
-                    real_w, real_h = xmax - xmin, ymax - ymin
+                    w_box, h_box = xmax - xmin, ymax - ymin
 
-                    # 🛡️ 厳格な誤検知フィルター（サイズ・解剖学構造）
-                    if real_w < 8 or real_h < 8:
-                        continue
-                    if real_w > orig_w * 0.7 or real_h > orig_h * 0.7:  # 画像の70%以上を占める巨大な誤認をカット
-                        continue
-                    if not is_human_face_geometry(orig_pts_all, real_w, real_h):
+                    if w_box < 10 or h_box < 10:
                         continue
 
-                    all_raw_items.append({
-                        "box": (xmin, ymin, real_w, real_h),
-                        "center": ((xmin + xmax) / 2, (ymin + ymax) / 2),
-                        "polygon": get_polygon_hull_pil(orig_pts_all),
-                        "raw_pts": orig_pts_all,
-                        "score": score + 0.5,
-                        "engine": "landmarker",
-                    })
+                    center_x = xmin + w_box / 2
+                    center_y = ymin + h_box / 2
+                    is_dup = False
+                    for pcx, pcy in processed_centers:
+                        if math.hypot(center_x - pcx, center_y - pcy) < dup_pixel_thresh:
+                            is_dup = True
+                            break
+                    if is_dup:
+                        continue
+
+                    processed_centers.append((center_x, center_y))
+
+                    def process_target(indices, target_type):
+                        target_pts = [orig_pts_all[i] for i in indices if i < len(orig_pts_all)]
+                        if not target_pts:
+                            return
+                        tx = [p[0] for p in target_pts]
+                        ty = [p[1] for p in target_pts]
+                        tw, th = max(tx) - min(tx), max(ty) - min(ty)
+                        if tw < 3 or th < 3:
+                            return
+                        poly = get_polygon_hull_pil(target_pts)
+                        detected_items.append({"box": (min(tx), min(ty), tw, th), "polygon": poly, "type": target_type})
+
+                    if "顔全体" in mask_targets:
+                        poly_all = get_polygon_hull_pil(orig_pts_all)
+                        detected_items.append({"box": (xmin, ymin, w_box, h_box), "polygon": poly_all, "type": "face"})
+                    if "目元（両目）" in mask_targets:
+                        process_target(INDEX_RIGHT_EYE + INDEX_LEFT_EYE, "eyes")
+                    if "右目 (解剖学的)" in mask_targets:
+                        process_target(INDEX_RIGHT_EYE, "eye_r")
+                    if "左目 (解剖学的)" in mask_targets:
+                        process_target(INDEX_LEFT_EYE, "eye_l")
+                    if "鼻" in mask_targets:
+                        process_target(INDEX_NOSE, "nose")
+                    if "口元" in mask_targets:
+                        process_target(INDEX_MOUTH, "mouth")
         except Exception:
             pass
-
-        # --- FaceDetector (サブ判定) ---
-        if detector is not None:
-            try:
-                result_det = detector.detect(mp_image)
-                if result_det and result_det.detections:
-                    for detection in result_det.detections:
-                        score = detection.categories[0].score
-                        bbox = detection.bounding_box
-                        real_x = cx_off + (bbox.origin_x / curr_scale)
-                        real_y = cy_off + (bbox.origin_y / curr_scale)
-                        real_w = bbox.width / curr_scale
-                        real_h = bbox.height / curr_scale
-
-                        # 🛡️ 厳格な誤検知フィルター
-                        if real_w < 8 or real_h < 8:
-                            continue
-                        if real_w > orig_w * 0.7 or real_h > orig_h * 0.7:
-                            continue
-                        if not is_human_face_geometry([], real_w, real_h):
-                            continue
-
-                        center_pt = (real_x + real_w / 2, real_y + real_h / 2)
-                        axes = (max(1, int(real_w / 2 * 1.0)), max(1, int(real_h * 0.6)))
-                        num_pts = 16
-                        ellipse_pts = []
-                        for i in range(num_pts):
-                            angle = 2 * math.pi * i / num_pts
-                            ellipse_pts.append((center_pt[0] + axes[0] * math.cos(angle), center_pt[1] + axes[1] * math.sin(angle)))
-
-                        all_raw_items.append({
-                            "box": (real_x, real_y, real_w, real_h),
-                            "center": center_pt,
-                            "polygon": get_polygon_hull_pil(ellipse_pts),
-                            "raw_pts": None,
-                            "score": score,
-                            "engine": "detector",
-                        })
-            except Exception:
-                pass
-
-    progress_bar.empty()
-    
-    if not all_raw_items:
-        return []
-
-    # 重複判定・統合
-    kept_items = py_nms(all_raw_items, iou_threshold=0.35)
-
-    detected_items = []
-    for item in kept_items:
-        raw_pts = item.get("raw_pts")
-
-        if raw_pts is None:
-            if "顔全体" in mask_targets:
-                detected_items.append({"box": item["box"], "polygon": item["polygon"], "type": "face"})
-            continue
-
-        def process_target(indices, target_type):
-            target_pts = [raw_pts[i] for i in indices if i < len(raw_pts)]
-            if not target_pts:
-                return
-            x_coords = [p[0] for p in target_pts]
-            y_coords = [p[1] for p in target_pts]
-            xmin, xmax = min(x_coords), max(x_coords)
-            ymin, ymax = min(y_coords), max(y_coords)
-            w, h = xmax - xmin, ymax - ymin
-            if w < 2 or h < 2:
-                return
-            poly = get_polygon_hull_pil(target_pts)
-            detected_items.append({"box": (xmin, ymin, w, h), "polygon": poly, "type": target_type})
-
-        if "顔全体" in mask_targets:
-            detected_items.append({"box": item["box"], "polygon": item["polygon"], "type": "face"})
-        if "目元（両目）" in mask_targets:
-            process_target(INDEX_RIGHT_EYE + INDEX_LEFT_EYE, "eyes")
-        if "右目 (解剖学的)" in mask_targets:
-            process_target(INDEX_RIGHT_EYE, "eye_r")
-        if "左目 (解剖学的)" in mask_targets:
-            process_target(INDEX_LEFT_EYE, "eye_l")
-        if "鼻" in mask_targets:
-            process_target(INDEX_NOSE, "nose")
-        if "口元" in mask_targets:
-            process_target(INDEX_MOUTH, "mouth")
 
     return detected_items
 
@@ -617,19 +453,19 @@ if uploaded_file is not None:
         if not mask_targets:
             st.warning("⚠️ 「マスク対象」を少なくとも1つ選択してください。")
         else:
-            with st.spinner("AIが顔を精密検出中..."):
+            with st.spinner("顔を検出中..."):
                 try:
                     st.session_state.boxes = get_mask_boxes_locally(
                         input_image,
                         mask_targets,
                         grids=grids,
-                        scale_factor=scale_up_factor,
+                        enable_contrast=enable_contrast,
                     )
                     st.session_state.confirmed = False
                     if not st.session_state.boxes:
-                        st.info("顔が検出されませんでした。サイドバーの「🤖 判定の厳しさ」を下げるか、別のモードをお試しください。")
+                        st.info("顔が検出されませんでした。「高精度」や「超高精度」モードに変更してお試しください。")
                     else:
-                        st.success(f"解析成功！ {len(st.session_state.boxes)} 箇所の顔領域を検出しました。")
+                        st.success(f"解析成功！ {len(st.session_state.boxes)} 箇所の顔領域を正しく検出しました。")
                 except Exception as e:
                     st.error(f"解析エラーが発生しました: {e}")
                     st.text(traceback.format_exc())
