@@ -3,4 +3,4 @@ opencv-python==4.10.0.84
 mediapipe==1.0.0
 numpy==1.26.4
 Pillow==10.4.0
-protobuf<6.0dev,>=5.26.1
+protobuf>=5.26.1,<6.0dev
