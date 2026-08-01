@@ -1,7 +1,0 @@
-fastapi
-uvicorn[standard]
-python-multipart
-paddlepaddle
-paddleocr
-opencv-python
-numpy
