@@ -1,10 +1,12 @@
 手順書
 
-1.まず
+1.まずダウンロードしたものすべてを入れるファイルを英語で作ってください。日本語名だとエラーになる恐れがあります。例：はっくいっと×　hakit〇
+
+2.
 https://www.google.com/url?sa=E&source=gmail&q=https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task
 これを検索バーに入力し、ダウンロードしてください。
 
-2.次にダウンロードした face_landmarker.task を、app.py と同じフォルダ内にある mp_models フォルダの中に移動・保存してください。
+2.ダウンロードした face_landmarker.task を、app.py と同じフォルダ内にある mp_models フォルダの中に移動・保存してください。
 
 3.初回セットアップ.batをダブルクリックし、必要なものをインストールする。その後Enter...が表示されたらエンターキーを押し、画面を閉じる。
 
