@@ -1,39 +1,40 @@
 @echo off
 chcp 65001 > nul
-title AI Smart Masking Pro - クリーンセットアップ (MediaPipe 1.0.0)
+title AI Smart Masking Pro - 全自動クリーンセットアップ (MediaPipe 1.0.0 / Python 3.13対応)
 
 echo ===================================================
-echo 🧹 古い環境・キャッシュの完全削除を実行しています...
+echo 🧹 1/3: 既存パッケージの全削除・クリーン化を実行中...
 echo ===================================================
 
-:: 既存のライブラリを完全削除
-pip uninstall -y mediapipe opencv-python protobuf numpy pillow streamlit > nul 2>&1
+:: OpenCV関連や旧パッケージの競合を完全にリセット
+pip uninstall -y mediapipe opencv-python opencv-python-headless opencv-contrib-python protobuf numpy pillow streamlit > nul 2>&1
 
-:: pipのキャッシュをクリア
+:: pipのキャッシュを完全に消去
 pip cache purge > nul 2>&1
 
 echo.
 echo ===================================================
-echo 📦 MediaPipe 1.0.0 および必要パッケージを新規インストール中...
+echo 🔄 2/3: pipの最新化を行っています...
 echo ===================================================
-
-:: 最新のpipに更新
 python -m pip install --upgrade pip
 
-:: キャッシュを使わずにクリーンインストール
+echo.
+echo ===================================================
+echo 📦 3/3: パッケージの新規クリーンインストール中...
+echo ===================================================
 pip install --no-cache-dir -r requirements.txt
 
 if errorlevel 1 (
     echo.
     echo ===================================================
-    echo [!] エラーが発生しました。
+    echo [!] セットアップ中にエラーが発生しました。
     echo 上記のエラーメッセージをご確認ください。
     echo ===================================================
 ) else (
     echo.
     echo ===================================================
-    echo ✨ MediaPipe 1.0.0 のクリーンセットアップが完了しました！
-    echo 起動スクリプトまたはショートカットからアプリを起動できます。
+    echo ✨ MediaPipe 1.0.0 クリーンセットアップが完了しました！
+    echo アプリを起動できます。
     echo ===================================================
 )
 
