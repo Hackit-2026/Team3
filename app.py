@@ -4,44 +4,58 @@ import math
 import urllib.request
 import numpy as np
 import streamlit as st
-from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageEnhance
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 import traceback
 
+import mediapipe as mp
+from mediapipe.tasks import python as mp_python
+from mediapipe.tasks.python import vision
+
 # -------------------------------------------------------------------
-# 1. ページ基本設定
+# 1. ページ基本設定 ＆ セッション初期化
 # -------------------------------------------------------------------
 st.set_page_config(
     page_title="AI Smart Masking Pro", page_icon="🛡️", layout="wide"
 )
 
 st.title("🛡️ AI Smart Masking Pro")
-st.caption("通信なし・完全オフライン動作。背景誤検知カット ＆ 群衆ハイブリッド認識エンジン搭載。")
+st.caption("通信なし・完全オフライン動作。Tasks API ＆ 遠距離特化フルレンジモデル（Full Range）搭載。")
+
+if "boxes" not in st.session_state:
+    st.session_state.boxes = None
+if "confirmed" not in st.session_state:
+    st.session_state.confirmed = False
+if "file_id" not in st.session_state:
+    st.session_state.file_id = None
+if "uploaded_file_data" not in st.session_state:
+    st.session_state.uploaded_file_data = None
 
 # -------------------------------------------------------------------
-# 2. モデルファイルの自動ダウンロード ＆ ロード
+# 2. 遠距離特化型モデル（Full Range）の自動取得
 # -------------------------------------------------------------------
 MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mp_models")
 os.makedirs(MODEL_DIR, exist_ok=True)
 
 FACE_LANDMARKER_PATH = os.path.join(MODEL_DIR, "face_landmarker.task")
-FACE_DETECTOR_PATH = os.path.join(MODEL_DIR, "blaze_face_short_range.tflite")
+# 遠距離・集合写真・交差点に対応した Full Range モデルを採用
+FACE_DETECTOR_PATH = os.path.join(MODEL_DIR, "blaze_face_full_range.tflite")
 
 MODEL_URLS = {
     FACE_LANDMARKER_PATH: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
-    FACE_DETECTOR_PATH: "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite"
+    FACE_DETECTOR_PATH: "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_full_range/float16/1/blaze_face_full_range.tflite"
 }
 
 def ensure_models_exist():
     for path, url in MODEL_URLS.items():
         if not os.path.exists(path):
             filename = os.path.basename(path)
-            with st.spinner(f"📦 必要なモデルファイル ({filename}) を初期ダウンロード中..."):
+            with st.spinner(f"📦 遠距離・群衆特化モデル ({filename}) を自動ダウンロード中..."):
                 try:
                     req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
                     with urllib.request.urlopen(req) as response, open(path, 'wb') as out_file:
                         out_file.write(response.read())
                 except Exception as e:
-                    st.error(f"❌ 必須モデル ({filename}) のダウンロードに失敗しました: {e}")
+                    st.error(f"❌ モデル ({filename}) のダウンロードに失敗しました: {e}")
                     st.stop()
 
 ensure_models_exist()
@@ -49,11 +63,7 @@ ensure_models_exist()
 @st.cache_resource
 def load_mediapipe_tasks(confidence):
     try:
-        import mediapipe as mp
-        from mediapipe.tasks import python as mp_python
-        from mediapipe.tasks.python import vision
-        
-        # FaceDetector (メインエンジン: 全サイズの顔の枠を確実に捉える)
+        # Full Range Detector (遠距離・集合写真用)
         base_options_det = mp_python.BaseOptions(model_asset_path=FACE_DETECTOR_PATH)
         options_det = vision.FaceDetectorOptions(
             base_options=base_options_det,
@@ -62,7 +72,7 @@ def load_mediapipe_tasks(confidence):
         )
         detector = vision.FaceDetector.create_from_options(options_det)
 
-        # FaceLandmarker (精密輪郭・パーツ指定用エンジン)
+        # Landmarker (パーツ指定・輪郭用)
         base_options_lm = mp_python.BaseOptions(model_asset_path=FACE_LANDMARKER_PATH)
         options_lm = vision.FaceLandmarkerOptions(
             base_options=base_options_lm,
@@ -73,19 +83,10 @@ def load_mediapipe_tasks(confidence):
             min_tracking_confidence=0.1,
         )
         landmarker = vision.FaceLandmarker.create_from_options(options_lm)
-        
-        return mp, detector, landmarker
+        return detector, landmarker
     except Exception as e:
-        st.error(f"初期化エラー: {e}")
-        return None, None, None
-
-# セッション状態の初期化
-if "boxes" not in st.session_state:
-    st.session_state.boxes = None
-if "confirmed" not in st.session_state:
-    st.session_state.confirmed = False
-if "file_id" not in st.session_state:
-    st.session_state.file_id = None
+        st.error(f"MediaPipe Tasks 初期化エラー: {e}")
+        return None, None
 
 # -------------------------------------------------------------------
 # 3. サイドバー設定
@@ -99,26 +100,23 @@ scan_mode = st.sidebar.radio(
     [
         "標準（1人〜少人数）",
         "高精度（集合写真）",
-        "群衆・交差点（超広域）",
+        "限界突破（群衆・交差点）",
     ],
     index=1,
 )
 
-# モードに応じた内部パラメーター（無理な拡大を撤廃し、純粋なグリッド分割で対応）
+# モードに応じたパラメーターの自動最適化
 if scan_mode == "標準（1人〜少人数）":
     grids = [1]
-    enable_contrast = False
-    min_confidence = 0.50
+    auto_confidence = 0.50
 elif scan_mode == "高精度（集合写真）":
     grids = [1, 2]
-    enable_contrast = True
-    min_confidence = 0.40
+    auto_confidence = 0.35
 else:
-    grids = [1, 2, 3, 4]  # 4x4分割で交差点の豆粒も安全にズームイン
-    enable_contrast = True
-    min_confidence = 0.35 # 背景を誤認しないギリギリの安全ライン
+    grids = [1, 2, 3]
+    auto_confidence = 0.20
 
-mp, detector, landmarker = load_mediapipe_tasks(min_confidence)
+detector, landmarker = load_mediapipe_tasks(auto_confidence)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🎯 マスク対象")
@@ -170,7 +168,7 @@ elif mask_type == "塗りつぶし（カラー指定）":
 
 
 # -------------------------------------------------------------------
-# 4. Pure Python / Pillow 画像処理ユーティリティ
+# 4. Pure Python / Pillow 画像処理 ＆ ユーティリティ
 # -------------------------------------------------------------------
 def get_emoji_font(font_size: int):
     font_candidates = ["seguiemj.ttf", "NotoColorEmoji.ttf", "Apple Color Emoji.ttc", "arial.ttf"]
@@ -201,8 +199,7 @@ def create_cropped_emoji_image(emoji_char: str, target_size: int) -> Image.Image
     return cropped.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
 def get_polygon_hull_pil(pts):
-    if len(pts) < 3:
-        return [(int(p[0]), int(p[1])) for p in pts]
+    if len(pts) < 3: return [(int(p[0]), int(p[1])) for p in pts]
     def cross(o, a, b):
         return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
     sorted_pts = sorted(pts, key=lambda p: (p[0], p[1]))
@@ -218,16 +215,7 @@ def get_polygon_hull_pil(pts):
         upper.append(p)
     return [(int(p[0]), int(p[1])) for p in (lower[:-1] + upper[:-1])]
 
-def apply_pillow_contrast(pil_img):
-    try:
-        auto_img = ImageOps.autocontrast(pil_img, cutoff=1)
-        enhancer = ImageEnhance.Contrast(auto_img)
-        return enhancer.enhance(1.2)
-    except Exception:
-        return pil_img
-
 def py_nms(boxes, iou_threshold=0.35):
-    """顔の重複検出を統合する関数（信頼度順）"""
     if len(boxes) == 0:
         return []
     boxes_np = np.array(boxes)
@@ -261,11 +249,11 @@ def py_nms(boxes, iou_threshold=0.35):
 
 
 # -------------------------------------------------------------------
-# 5. 安全な顔検出 ＆ ハイブリッド検証処理
+# 5. Full Range Tasks AI による顔検出 ＆ パーツ決定
 # -------------------------------------------------------------------
-def get_mask_boxes_locally(image: Image.Image, mask_targets: list, grids: list, enable_contrast: bool):
+def get_mask_boxes_locally(image: Image.Image, mask_targets: list, grids: list):
     if detector is None:
-        st.error("AIエンジンの初期化に失敗しています。")
+        st.error("FaceDetectorの初期化に失敗しています。")
         return []
 
     orig_w, orig_h = image.size
@@ -278,9 +266,8 @@ def get_mask_boxes_locally(image: Image.Image, mask_targets: list, grids: list, 
             continue
         step_x = orig_w // g
         step_y = orig_h // g
-        overlap_x = int(step_x * 0.25)
-        overlap_y = int(step_y * 0.25)
-
+        overlap_x = int(step_x * 0.3)
+        overlap_y = int(step_y * 0.3)
         for i in range(g):
             for j in range(g):
                 x1 = max(0, i * step_x - overlap_x)
@@ -289,36 +276,41 @@ def get_mask_boxes_locally(image: Image.Image, mask_targets: list, grids: list, 
                 y2 = min(orig_h, (j + 1) * step_y + overlap_y)
                 crops.append((x1, y1, x2 - x1, y2 - y1))
 
-    for cx_off, cy_off, cw, ch in crops:
+    for cx, cy, cw, ch in crops:
         if cw < 20 or ch < 20: continue
-
-        scan_crop_pil = image.crop((cx_off, cy_off, cx_off + cw, cy_off + ch))
         
-        if enable_contrast:
-            scan_crop_pil = apply_pillow_contrast(scan_crop_pil)
-
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.array(scan_crop_pil))
-
+        crop_pil = image.crop((cx, cy, cx + cw, cy + ch))
+        crop_np = np.array(crop_pil)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(crop_np))
+        
         try:
-            result = detector.detect(mp_image)
-            if result and result.detections:
-                for detection in result.detections:
+            results = detector.detect(mp_image)
+            if results and results.detections:
+                for detection in results.detections:
                     score = detection.categories[0].score
                     bbox = detection.bounding_box
                     
-                    real_x = cx_off + bbox.origin_x
-                    real_y = cy_off + bbox.origin_y
+                    real_x = cx + bbox.origin_x
+                    real_y = cy + bbox.origin_y
                     real_w = bbox.width
                     real_h = bbox.height
 
-                    # 🚫 階段やビルなどの「巨大な誤検知」を完全にシャットアウト
-                    if real_w < 5 or real_h < 5: continue
-                    if real_w > orig_w * 0.45 or real_h > orig_h * 0.45: continue
+                    # 🛡️ 誤検知カット：不自然な巨大枠（壁・階段等）や極小ノイズを排除
+                    if real_w < 6 or real_h < 6: continue
+                    if real_w > orig_w * 0.40 or real_h > orig_h * 0.40: continue
                     
-                    # 長すぎる・平べったすぎるものは顔ではない
-                    if real_w / real_h < 0.4 or real_w / real_h > 1.8: continue
+                    aspect = real_w / max(1, real_h)
+                    if aspect < 0.45 or aspect > 1.6: continue
 
-                    raw_faces.append([real_x, real_y, real_w, real_h, score])
+                    # 顔領域をおでこ〜顎まで確実にカバー
+                    pad_w = real_w * 0.12
+                    pad_h = real_h * 0.12
+                    bx = max(0, real_x - pad_w)
+                    by = max(0, real_y - pad_h * 1.4)
+                    bw = min(orig_w - bx, real_w + pad_w * 2)
+                    bh = min(orig_h - by, real_h + pad_h * 2.3)
+
+                    raw_faces.append([bx, by, bw, bh, score])
         except Exception:
             pass
 
@@ -327,91 +319,75 @@ def get_mask_boxes_locally(image: Image.Image, mask_targets: list, grids: list, 
         return []
 
     detected_items = []
+    need_parts = any(t in mask_targets for t in ["目元（両目）", "右目 (解剖学的)", "左目 (解剖学的)", "鼻", "口元"])
+    
     INDEX_RIGHT_EYE = [33, 133, 160, 159, 158, 144, 145, 153]
     INDEX_LEFT_EYE = [362, 263, 387, 386, 385, 373, 374, 380]
     INDEX_NOSE = [1, 2, 98, 327, 278, 48]
     INDEX_MOUTH = [61, 291, 37, 267, 0, 17, 18, 14, 87, 317]
 
-    need_parts = any(t in mask_targets for t in ["目元（両目）", "右目 (解剖学的)", "左目 (解剖学的)", "鼻", "口元"])
-
-    for face_box in unique_faces:
-        fx, fy, fw, fh = face_box
+    for fx, fy, fw, fh in unique_faces:
+        fx, fy, fw, fh = int(fx), int(fy), int(fw), int(fh)
         
-        # 1. 検出された枠（安全サイズ）
+        cx_box, cy_box = fx + fw / 2, fy + fh / 2
+        rx, ry = fw / 2, fh / 2 * 1.10
+        ellipse_pts = [(cx_box + rx * math.cos(a), cy_box + ry * math.sin(a)) for a in np.linspace(0, 2 * math.pi, 16)]
+        default_polygon = get_polygon_hull_pil(ellipse_pts)
+        
         face_polygon = None
-        
-        # 2. 精密マスク用のLandmarkerテスト
-        if landmarker is not None:
-            pad_x = fw * 0.2
-            pad_y = fh * 0.2
-            cx1 = max(0, int(fx - pad_x))
-            cy1 = max(0, int(fy - pad_y))
-            cx2 = min(orig_w, int(fx + fw + pad_x))
-            cy2 = min(orig_h, int(fy + fh + pad_y))
+        orig_pts_all = []
+
+        if (need_parts or mask_shape == "顔の形（輪郭に沿う・楕円）") and landmarker is not None:
+            pad_x = int(fw * 0.2)
+            pad_y = int(fh * 0.2)
+            cx1 = max(0, fx - pad_x)
+            cy1 = max(0, fy - pad_y)
+            cx2 = min(orig_w, fx + fw + pad_x)
+            cy2 = min(orig_h, fy + fh + pad_y)
             
             face_crop = image.crop((cx1, cy1, cx2, cy2))
+            crop_np = np.array(face_crop)
+            mp_crop = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(crop_np))
             
             try:
-                mp_face = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.array(face_crop))
-                res_lm = landmarker.detect(mp_face)
-                
-                # 精密な468点が取れた場合のみ、輪郭を描画
+                res_lm = landmarker.detect(mp_crop)
                 if res_lm and res_lm.face_landmarks:
-                    lm_pts = res_lm.face_landmarks[0]
-                    orig_pts_all = [(cx1 + lm.x * (cx2 - cx1), cy1 + lm.y * (cy2 - cy1)) for lm in lm_pts]
-                    
+                    lm = res_lm.face_landmarks[0]
+                    orig_pts_all = [(cx1 + int(p.x * (cx2 - cx1)), cy1 + int(p.y * (cy2 - cy1))) for p in lm]
                     face_polygon = get_polygon_hull_pil(orig_pts_all)
-                    
-                    if need_parts:
-                        def process_target(indices, target_type):
-                            target_pts = [orig_pts_all[i] for i in indices if i < len(orig_pts_all)]
-                            if not target_pts: return
-                            tx = [p[0] for p in target_pts]
-                            ty = [p[1] for p in target_pts]
-                            tw, th = max(tx) - min(tx), max(ty) - min(ty)
-                            if tw < 2 or th < 2: return
-                            pad_tw = tw * 0.1
-                            pad_th = th * 0.1
-                            final_box = (min(tx)-pad_tw, min(ty)-pad_th, tw+pad_tw*2, th+pad_th*2)
-                            detected_items.append({"box": final_box, "polygon": get_polygon_hull_pil(target_pts), "type": target_type})
-
-                        if "目元（両目）" in mask_targets: process_target(INDEX_RIGHT_EYE + INDEX_LEFT_EYE, "eyes")
-                        if "右目 (解剖学的)" in mask_targets: process_target(INDEX_RIGHT_EYE, "eye_r")
-                        if "左目 (解剖学的)" in mask_targets: process_target(INDEX_LEFT_EYE, "eye_l")
-                        if "鼻" in mask_targets: process_target(INDEX_NOSE, "nose")
-                        if "口元" in mask_targets: process_target(INDEX_MOUTH, "mouth")
             except Exception:
                 pass
+        
+        if need_parts and orig_pts_all:
+            def process_target(indices, target_type):
+                target_pts = [orig_pts_all[i] for i in indices if i < len(orig_pts_all)]
+                if not target_pts: return
+                tx = [p[0] for p in target_pts]
+                ty = [p[1] for p in target_pts]
+                tw, th = max(tx) - min(tx), max(ty) - min(ty)
+                if tw < 2 or th < 2: return
+                pad_tw, pad_th = tw * 0.1, th * 0.1
+                final_box = (min(tx)-pad_tw, min(ty)-pad_th, tw+pad_tw*2, th+pad_th*2)
+                detected_items.append({"box": final_box, "polygon": get_polygon_hull_pil(target_pts), "type": target_type})
 
-        # 3. 顔全体の処理（ハイブリッド・フォールバック）
+            if "目元（両目）" in mask_targets: process_target(INDEX_RIGHT_EYE + INDEX_LEFT_EYE, "eyes")
+            if "右目 (解剖学的)" in mask_targets: process_target(INDEX_RIGHT_EYE, "eye_r")
+            if "左目 (解剖学的)" in mask_targets: process_target(INDEX_LEFT_EYE, "eye_l")
+            if "鼻" in mask_targets: process_target(INDEX_NOSE, "nose")
+            if "口元" in mask_targets: process_target(INDEX_MOUTH, "mouth")
+
         if "顔全体" in mask_targets:
-            if face_polygon is not None:
-                # 輪郭が取れた場合は、その精密な輪郭でマスク
-                xs = [p[0] for p in face_polygon]
-                ys = [p[1] for p in face_polygon]
-                detected_items.append({
-                    "box": (min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)),
-                    "polygon": face_polygon,
-                    "type": "face"
-                })
-            else:
-                # 【重要】交差点などの豆粒顔で輪郭が取れなかった場合
-                # 捨てずに、安全なサイズの楕円を描画して確実にマスクする
-                cx, cy = fx + fw / 2, fy + fh / 2
-                rx, ry = fw / 2, fh / 2
-                ellipse_pts = [(cx + rx * math.cos(a), cy + ry * math.sin(a)) for a in np.linspace(0, 2 * math.pi, 16)]
-                
-                detected_items.append({
-                    "box": (fx, fy, fw, fh),
-                    "polygon": get_polygon_hull_pil(ellipse_pts),
-                    "type": "face"
-                })
+            final_poly = face_polygon if face_polygon is not None else default_polygon
+            xs = [p[0] for p in final_poly]
+            ys = [p[1] for p in final_poly]
+            poly_box = (min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys))
+            detected_items.append({"box": poly_box, "polygon": final_poly, "type": "face"})
 
     return detected_items
 
 
 # -------------------------------------------------------------------
-# 6. マスキング画像適用処理
+# 6. マスキング画像描画処理
 # -------------------------------------------------------------------
 def apply_masking(
     image: Image.Image,
@@ -497,7 +473,7 @@ def apply_masking(
 
 
 # -------------------------------------------------------------------
-# 7. メイン画面レイアウト
+# 7. メイン画面レイアウト（AxiosError 403 完全対策済み）
 # -------------------------------------------------------------------
 uploaded_file = st.file_uploader(
     "加工したい写真をアップロードしてください (JPEG, PNG, WEBP, BMP)",
@@ -510,79 +486,88 @@ if uploaded_file is not None:
         st.session_state.file_id = current_file_id
         st.session_state.boxes = None
         st.session_state.confirmed = False
+        
+        try:
+            pil_img = Image.open(uploaded_file)
+            if pil_img.mode != "RGB":
+                pil_img = pil_img.convert("RGB")
+            st.session_state.uploaded_file_data = pil_img
+        except Exception as e:
+            st.error(f"画像の読み込みに失敗しました: {e}")
+            st.session_state.uploaded_file_data = None
 
-    input_image = Image.open(uploaded_file).convert("RGB")
+    if st.session_state.uploaded_file_data is not None:
+        input_image = st.session_state.uploaded_file_data
 
-    if st.button("🚀 AIモザイク解析を開始", type="primary"):
-        if not mask_targets:
-            st.warning("⚠️ 「マスク対象」を少なくとも1つ選択してください。")
-        else:
-            with st.spinner("AIが顔を精密検出中..."):
-                try:
-                    st.session_state.boxes = get_mask_boxes_locally(
-                        input_image,
-                        mask_targets,
-                        grids=grids,
-                        enable_contrast=enable_contrast,
-                    )
-                    st.session_state.confirmed = False
-                    if not st.session_state.boxes:
-                        st.info("顔が検出されませんでした。「群衆・交差点」モードもお試しください。")
-                    else:
-                        st.success(f"解析成功！ {len(st.session_state.boxes)} 箇所の顔領域を検出しました。")
-                except Exception as e:
-                    st.error(f"解析エラーが発生しました: {e}")
-                    st.text(traceback.format_exc())
-
-    if st.session_state.boxes is not None:
-        processed_image = apply_masking(
-            input_image,
-            st.session_state.boxes,
-            mask_shape,
-            mask_type,
-            grid_size,
-            mosaic_size,
-            blur_radius,
-            fill_color,
-            offset_x,
-            offset_y,
-            emoji_char,
-            emoji_scale,
-            emoji_angle,
-        )
-
-        st.markdown("---")
-        col_left, col_right = st.columns(2)
-        with col_left:
-            st.subheader("📷 元の画像")
-            st.image(input_image, use_column_width=True)
-        with col_right:
-            st.subheader("🔍 マスキング結果")
-            st.image(processed_image, use_column_width=True)
-
-        st.markdown("---")
-        confirm_col1, confirm_col2 = st.columns([2, 3])
-        with confirm_col1:
-            if not st.session_state.confirmed:
-                if st.button("✅ これで決定", type="primary", use_container_width=True):
-                    st.session_state.confirmed = True
-                    st.rerun()
+        if st.button("🚀 AIモザイク解析を開始", type="primary"):
+            if not mask_targets:
+                st.warning("⚠️ 「マスク対象」を少なくとも1つ選択してください。")
             else:
-                st.success("✨ 位置とデザインが確定しました！")
-                if st.button("🔄 もう一度微調整する", use_container_width=True):
-                    st.session_state.confirmed = False
-                    st.rerun()
-        with confirm_col2:
-            if st.session_state.confirmed:
-                buf = io.BytesIO()
-                processed_image.save(buf, format="PNG")
-                st.download_button(
-                    label="💾 加工画像をダウンロード",
-                    data=buf.getvalue(),
-                    file_name="masked_result.png",
-                    mime="image/png",
-                    use_container_width=True,
-                    type="primary",
-                )
+                with st.spinner("AIが顔を精密検出中..."):
+                    try:
+                        st.session_state.boxes = get_mask_boxes_locally(
+                            input_image,
+                            mask_targets,
+                            grids=grids,
+                        )
+                        st.session_state.confirmed = False
+                        if not st.session_state.boxes:
+                            st.info("顔が検出されませんでした。「限界突破」モードに変更してお試しください。")
+                        else:
+                            st.success(f"解析成功！ {len(st.session_state.boxes)} 箇所の顔領域を検出しました。")
+                    except Exception as e:
+                        st.error(f"解析エラーが発生しました: {e}")
+                        st.text(traceback.format_exc())
+
+        if st.session_state.boxes is not None:
+            processed_image = apply_masking(
+                input_image,
+                st.session_state.boxes,
+                mask_shape,
+                mask_type,
+                grid_size,
+                mosaic_size,
+                blur_radius,
+                fill_color,
+                offset_x,
+                offset_y,
+                emoji_char,
+                emoji_scale,
+                emoji_angle,
+            )
+
+            st.markdown("---")
+            col_left, col_right = st.columns(2)
+            with col_left:
+                st.subheader("📷 元の画像")
+                st.image(input_image, use_column_width=True)
+            with col_right:
+                st.subheader("🔍 マスキング結果")
+                st.image(processed_image, use_column_width=True)
+
+            st.markdown("---")
+            confirm_col1, confirm_col2 = st.columns([2, 3])
+            with confirm_col1:
+                if not st.session_state.confirmed:
+                    if st.button("✅ これで決定", type="primary", use_container_width=True):
+                        st.session_state.confirmed = True
+                        st.rerun()
+                else:
+                    st.success("✨ 位置とデザインが確定しました！")
+                    if st.button("🔄 もう一度微調整する", use_container_width=True):
+                        st.session_state.confirmed = False
+                        st.rerun()
+            with confirm_col2:
+                if st.session_state.confirmed:
+                    buf = io.BytesIO()
+                    processed_image.save(buf, format="PNG")
+                    st.download_button(
+                        label="💾 加工画像をダウンロード",
+                        data=buf.getvalue(),
+                        file_name="masked_result.png",
+                        mime="image/png",
+                        use_container_width=True,
+                        type="primary",
+                    )
 else:
     st.info("👆 写真ファイルをアップロードして「🚀 AIモザイク解析を開始」をクリックしてください。")
