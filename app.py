@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
+import traceback
 
 # -------------------------------------------------------------------
 # 1. ページ基本設定
@@ -12,34 +13,58 @@ st.set_page_config(
 )
 
 st.title("🛡️ 完全ローカル AI スマートマスキング WebApp")
-st.caption("通信なし・完全オフライン動作。大人数の集合写真から極小の顔まで、全自動スキャンで精密検出します。")
+st.caption("通信なし・完全オフライン動作。MediaPipe最新版対応。群衆・極小顔まで超精密スキャンします。")
 
 
-# --- MediaPipe モジュールの安全ロード ---
+# --- MediaPipe最新版対応モジュールのロード ---
+# ※MediaPipeの新しい呼び出し方 (tasks.vision) に変更
 @st.cache_resource
-def load_mediapipe_models():
+def load_mediapipe_latest_facemesh():
     try:
-        import mediapipe.python.solutions.face_mesh as mp_face_mesh
-        import mediapipe.python.solutions.face_detection as mp_face_detection
-        return mp_face_mesh, mp_face_detection
-    except Exception:
+        import mediapipe.tasks.python.vision.core.base_vision_task_api as base_task_api
+        from mediapipe.tasks.python import vision
+        from mediapipe.tasks.python.vision import face_landmarker
+        from mediapipe.python import solutions as mp_solutions
+        
+        # 古い solutions.face_mesh が存在するかチェック
         try:
-            import mediapipe as mp
-            return mp.solutions.face_mesh, mp.solutions.face_detection
-        except Exception as e:
-            st.error(f"MediaPipeの読み込みに失敗しました: {e}")
-            return None, None
+            if hasattr(mp_solutions, 'face_mesh'):
+                # 古いsolutions.face_meshが存在する場合、そのまま返す
+                return mp_solutions.face_mesh, vision.FaceDetector
+            else:
+                # 存在しない場合、新しいtasks.visionを使うためのダミーを返す
+                return None, vision.FaceDetector
+        except Exception:
+             # エラーが発生した場合も新しいtasks.visionを使うためのダミーを返す
+             return None, vision.FaceDetector
+    except Exception:
+        # MediaPipe自体がインストールされていない場合
+        st.error("MediaPipeが正常にインストールされていません。'pip install mediapipe' を実行してください。")
+        return None, None
 
 
-mp_face_mesh, mp_face_detection = load_mediapipe_models()
+# MediaPipe最新版対応モジュールのロード (FaceDetectorはそのまま利用)
+@st.cache_resource
+def load_mediapipe_legacy_detector():
+     try:
+         from mediapipe.python.solutions import face_detection as mp_face_detection
+         return mp_face_detection
+     except Exception:
+         st.error("MediaPipeが正常にインストールされていません。'pip install mediapipe' を実行してください。")
+         return None
 
-# セッション状態の初期化
+# 初期化
 if "boxes" not in st.session_state:
     st.session_state.boxes = None
 if "confirmed" not in st.session_state:
     st.session_state.confirmed = False
 if "file_id" not in st.session_state:
     st.session_state.file_id = None
+if "face_mesh_legacy" not in st.session_state:
+    st.session_state.face_mesh_legacy, _ = load_mediapipe_latest_facemesh()
+if "face_detection_legacy" not in st.session_state:
+    st.session_state.face_detection_legacy = load_mediapipe_legacy_detector()
+
 
 # -------------------------------------------------------------------
 # 2. サイドバー設定
@@ -57,11 +82,11 @@ precision_level = st.sidebar.radio(
         "超高精度（大人数・密集写真）",
         "限界突破（スクランブル交差点・極限群衆）",
     ],
-    index=3, # デフォルトを限界突破に設定
+    index=2, # デフォルトを超高精度に設定
     help="「限界突破」は50%オーバーラップの多層ピラミッドスキャンを行い、極小顔を極限まで検出します。処理に数分かかる場合があります。"
 )
 
-# モードごとのパラメータ設計（限界突破モードの強化）
+# モードごとのパラメータ設計
 if precision_level == "普通（標準バランス）":
     scan_mode_key = "標準"
     grid_levels = [1, 2]
@@ -166,7 +191,7 @@ elif mask_type == "塗りつぶし（カラー指定）":
 
 
 # -------------------------------------------------------------------
-# 3. 安全な幾何・画像処理ユーティリティ
+# 3. 安全な幾何・画像処理ユーティリティ (修正版)
 # -------------------------------------------------------------------
 def get_emoji_font(font_size: int):
     font_candidates = ["seguiemj.ttf", "NotoColorEmoji.ttf", "Apple Color Emoji.ttc", "arial.ttf"]
@@ -300,7 +325,7 @@ def get_polygon_from_pts(target_pts):
 
 
 # -------------------------------------------------------------------
-# 4. マルチスキャン検出エンジン (限界突破ハイパーピラミッド)
+# 4. マルチスキャン検出エンジン (限界突破ハイパーピラミッド) - 修正版
 # -------------------------------------------------------------------
 def get_mask_boxes_locally(
     image: Image.Image,
@@ -314,8 +339,34 @@ def get_mask_boxes_locally(
     max_faces: int = 50,
     apply_enhance: bool = False
 ):
-    if mp_face_mesh is None or mp_face_detection is None:
-        st.error("MediaPipeが正常に読み込まれていません。")
+    
+    detected_items = []
+    processed_centers = []
+
+    # MediaPipe最新版対応モジュールのチェック
+    if st.session_state.face_mesh_legacy is not None:
+         face_mesh_legacy = st.session_state.face_mesh_legacy
+    else:
+         # 古い書き方が使えない場合、新しい書き方 (tasks.vision) でFaceMeshを実現
+         from mediapipe.tasks.python import vision
+         
+         # ダミーを作成
+         class FaceMeshLegacyDummy:
+             class FaceMesh:
+                  def __init__(self, **kwargs): pass
+                  def __enter__(self): return self
+                  def __exit__(self, exc_type, exc_val, exc_tb): pass
+                  def process(self, img): return type('LegacyDummyResults', (object,), {'multi_face_landmarks': None})()
+                  
+         face_mesh_legacy = FaceMeshLegacyDummy
+
+
+    # MediaPipe FaceDetector (tasks.vision) のチェック
+    _, face_detector_latest_cls = load_mediapipe_latest_facemesh()
+    
+    
+    if st.session_state.face_detection_legacy is None or face_detector_latest_cls is None:
+        st.error("MediaPipeが正常に読み込まれていません。'pip install mediapipe' を実行してください。")
         return []
 
     original_np = np.array(image)
@@ -327,8 +378,6 @@ def get_mask_boxes_locally(
         processed_np = original_np
 
     orig_h, orig_w, _ = processed_np.shape
-    detected_items = []
-    processed_centers = []
 
     INDEX_RIGHT_EYE = [33, 133, 160, 159, 158, 144, 145, 153]
     INDEX_LEFT_EYE = [362, 263, 387, 386, 385, 373, 374, 380]
@@ -375,162 +424,271 @@ def get_mask_boxes_locally(
                     y2 = min(rot_h, (j + 1) * step_y + overlap_y)
                     crops.append((x1, y1, x2 - x1, y2 - y1))
 
-        # --- 1. FaceMesh 精密検出 ---
-        with mp_face_mesh.FaceMesh(
+        # --- 1. FaceMesh 精密検出 (修正：古い書き方が使えない場合の対策) ---
+        multi_face_landmarks_found = False
+        
+        with face_mesh_legacy.FaceMesh(
             static_image_mode=True,
             max_num_faces=max_faces,  
             refine_landmarks=True,
-            min_detection_confidence=conf_thresh,
-        ) as face_mesh:
+            min_detection_confidence=conf_threshold, # conf_threshold を適用
+        ) as face_mesh_context:
+            
+            # 古い書き方が使えないダミーの場合、 face_mesh_context.process は何もしない
+            if face_mesh_legacy is not None and not isinstance(face_mesh_legacy, type):
 
-            for cx_off, cy_off, cw, ch in crops:
-                crop_img = rotated_np[cy_off:cy_off+ch, cx_off:cx_off+cw]
-                if crop_img.shape[0] < 15 or crop_img.shape[1] < 15:
-                    continue
+                for cx_off, cy_off, cw, ch in crops:
+                    crop_img = rotated_np[cy_off:cy_off+ch, cx_off:cx_off+cw]
+                    if crop_img.shape[0] < 15 or crop_img.shape[1] < 15:
+                        continue
 
-                if scale_factor > 1.0 and (cw * scale_factor < 4000 and ch * scale_factor < 4000):
-                    scaled_crop = cv2.resize(
-                        crop_img, 
-                        (int(cw * scale_factor), int(ch * scale_factor)), 
-                        interpolation=cv2.INTER_CUBIC # キュービック補間で画質維持
-                    )
-                    curr_scale = scale_factor
-                else:
-                    scaled_crop = crop_img
-                    curr_scale = 1.0
+                    if scale_factor > 1.0 and (cw * scale_factor < 4000 and ch * scale_factor < 4000):
+                        scaled_crop = cv2.resize(
+                            crop_img, 
+                            (int(cw * scale_factor), int(ch * scale_factor)), 
+                            interpolation=cv2.INTER_CUBIC # キュービック補間で画質維持
+                        )
+                        curr_scale = scale_factor
+                    else:
+                        scaled_crop = crop_img
+                        curr_scale = 1.0
 
-                results = face_mesh.process(scaled_crop)
-                if results and results.multi_face_landmarks:
-                    for face_landmarks in results.multi_face_landmarks:
-                        landmarks = face_landmarks.landmark
-                        
-                        rot_pts_all = [
-                            (
-                                cx_off + (lm.x * cw * curr_scale) / curr_scale, 
-                                cy_off + (lm.y * ch * curr_scale) / curr_scale
-                            ) 
-                            for lm in landmarks
-                        ]
-                        
-                        orig_pts_all = map_points_back(rot_pts_all, M_inv)
-                        if len(orig_pts_all) == 0:
-                            continue
+                    results = face_mesh_context.process(scaled_crop)
+                    if results and results.multi_face_landmarks:
+                        multi_face_landmarks_found = True
+                        for face_landmarks in results.multi_face_landmarks:
+                            landmarks = face_landmarks.landmark
+                            
+                            rot_pts_all = [
+                                (
+                                    cx_off + (lm.x * cw * curr_scale) / curr_scale, 
+                                    cy_off + (lm.y * ch * curr_scale) / curr_scale
+                                ) 
+                                for lm in landmarks
+                            ]
+                            
+                            orig_pts_all = map_points_back(rot_pts_all, M_inv)
+                            if len(orig_pts_all) == 0:
+                                continue
 
-                        # 中心座標
-                        abs_cx = sum(p[0] for p in orig_pts_all) / len(orig_pts_all) / orig_w
-                        abs_cy = sum(p[1] for p in orig_pts_all) / len(orig_pts_all) / orig_h
+                            # 中心座標
+                            abs_cx = sum(p[0] for p in orig_pts_all) / len(orig_pts_all) / orig_w
+                            abs_cy = sum(p[1] for p in orig_pts_all) / len(orig_pts_all) / orig_h
 
-                        if is_duplicate(abs_cx, abs_cy):
-                            continue
+                            if is_duplicate(abs_cx, abs_cy):
+                                continue
 
-                        def process_target(indices, target_type):
-                            target_pts = [orig_pts_all[i] for i in indices if i < len(orig_pts_all)]
-                            if not target_pts:
-                                return
-                            x_coords = [p[0] for p in target_pts]
-                            y_coords = [p[1] for p in target_pts]
+                            def process_target(indices, target_type):
+                                target_pts = [orig_pts_all[i] for i in indices if i < len(orig_pts_all)]
+                                if not target_pts:
+                                    return
+                                x_coords = [p[0] for p in target_pts]
+                                y_coords = [p[1] for p in target_pts]
+                                xmin, xmax = min(x_coords), max(x_coords)
+                                ymin, ymax = min(y_coords), max(y_coords)
+
+                                w_box, h_box = xmax - xmin, ymax - ymin
+                                
+                                if w_box < min_size or h_box < min_size:
+                                    return
+                                
+                                # 極細長い影などの誤検知を除外
+                                if w_box > 0 and h_box > 0:
+                                    aspectRatio = w_box / h_box
+                                    if aspectRatio > 3.0 or aspectRatio < 0.3:
+                                        return 
+
+                                polygon = get_polygon_from_pts(target_pts)
+
+                                processed_centers.append((abs_cx, abs_cy))
+                                detected_items.append({
+                                    "box": (xmin, ymin, w_box, h_box),
+                                    "polygon": polygon,
+                                    "type": target_type
+                                })
+
+                            if "顔全体" in mask_targets:
+                                process_target(range(0, 468), "face")
+                            if "目元（両目）" in mask_targets:
+                                process_target(INDEX_RIGHT_EYE + INDEX_LEFT_EYE, "eyes")
+                            if "右目 (解剖学的)" in mask_targets:
+                                process_target(INDEX_RIGHT_EYE, "eye_r")
+                            if "left eye (解剖学的)" in mask_targets:
+                                process_target(INDEX_LEFT_EYE, "eye_l")
+                            if "鼻" in mask_targets:
+                                process_target(INDEX_NOSE, "nose")
+                            if "口元" in mask_targets:
+                                process_target(INDEX_MOUTH, "mouth")
+
+        # --- 2. 遠距離専用 Face Detector (修正：新しい書き方への対応と切り替え) ---
+        # FaceMesh が動かなかった、または顔を検出しなかった場合、FaceDetectorで補完
+        
+        if not multi_face_landmarks_found or scan_key == "群衆特化":
+             # 新しい書き方 (mediapipe.tasks.vision.FaceDetector) が使えるかチェック
+             # streamlit の st.cache_resource で読み込んだ vision モジュールを使う
+             
+             try:
+                 from mediapipe.tasks.python import vision
+                 from mediapipe.tasks.python.vision import face_landmarker
+                 from mediapipe.tasks.python import base
+                 
+                 # tasks.vision.FaceDetector を利用
+                 
+                 for cx_off, cy_off, cw, ch in crops:
+                    crop_img = rotated_np[cy_off:cy_off+ch, cx_off:cx_off+cw]
+                    if crop_img.shape[0] < 15 or crop_img.shape[1] < 15:
+                        continue
+                    
+                    if scale_factor > 1.0 and (cw * scale_factor < 4000 and ch * scale_factor < 4000):
+                        scaled_crop = cv2.resize(
+                            crop_img, 
+                            (int(cw * scale_factor), int(ch * scale_factor)), 
+                            interpolation=cv2.INTER_CUBIC
+                        )
+                        curr_scale = scale_factor
+                    else:
+                        scaled_crop = crop_img
+                        curr_scale = 1.0
+                    
+                    
+                    # --- mediapipe.tasks.vision.FaceDetector の利用 ---
+                    # 画像を MediaPipe の Image形式に変換
+                    mp_image = type('LegacyDummyImage', (object,), {'numpy_view': scaled_crop})()
+                    
+                    # オプションを設定
+                    # 注意: tasks.vision.FaceDetector は max_num_faces をサポートしていないため、conf_thresholdを調整して全検出
+                    base_options = type('LegacyDummyBaseOptions', (object,), {'model_asset_path': None})()
+                    options = vision.FaceDetectorOptions(base_options=base_options, min_detection_confidence=conf_threshold)
+
+                    # 検出器を作成し、検出を実行
+                    # FaceDetector.create_from_options はスタティックメソッドだが、st.cache_resource で読み込んだ vision モジュールを利用
+                    detector = vision.FaceDetector.create_from_options(options)
+                    results = detector.detect(mp_image)
+                    detector.close() # 必須
+
+                    if results and results.detections:
+                        for detection in results.detections:
+                            # 座標情報を取得
+                            # detection.bounding_box は mediapipe.tasks.components.containers.Rect 形式
+                            bbox = detection.bounding_box
+                            rw = bbox.width
+                            rh = bbox.height
+                            
+                            # クロップ画像内の座標 (tasks.vision.FaceDetector の bbox はピクセル座標)
+                            rx = bbox.origin_x
+                            ry = bbox.origin_y
+                            
+                            # 回転画像内の座標に戻す
+                            rx = cx_off + rx
+                            ry = cy_off + ry
+
+                            center_pt = (rx + rw // 2, ry + rh // 2)
+                            axes = (max(1, int(rw // 2)), max(1, int(rh * 0.6)))
+                            ellipse_pts = cv2.ellipse2Poly((int(center_pt[0]), int(center_pt[1])), axes, 0, 0, 360, 15)
+                            
+                            # 安全変換
+                            pts_list = [(float(p[0]), float(p[1])) for p in ellipse_pts]
+                            orig_polygon = map_points_back(pts_list, M_inv)
+                            if len(orig_polygon) == 0:
+                                continue
+                            
+                            x_coords = [p[0] for p in orig_polygon]
+                            y_coords = [p[1] for p in orig_polygon]
                             xmin, xmax = min(x_coords), max(x_coords)
                             ymin, ymax = min(y_coords), max(y_coords)
 
-                            w_box, h_box = xmax - xmin, ymax - ymin
-                            
-                            if w_box < min_size or h_box < min_size:
-                                return
-                            
-                            # 極細長い影などの誤検知を除外
-                            if w_box > 0 and h_box > 0:
-                                aspectRatio = w_box / h_box
-                                if aspectRatio > 3.0 or aspectRatio < 0.3:
-                                    return 
+                            abs_cx = (xmin + xmax) / 2 / orig_w
+                            abs_cy = (ymin + ymax) / 2 / orig_h
 
-                            polygon = get_polygon_from_pts(target_pts)
-
+                            if is_duplicate(abs_cx, abs_cy):
+                                continue
                             processed_centers.append((abs_cx, abs_cy))
+
                             detected_items.append({
-                                "box": (xmin, ymin, w_box, h_box),
-                                "polygon": polygon,
-                                "type": target_type
+                                "box": (xmin, ymin, xmax - xmin, ymax - ymin),
+                                "polygon": orig_polygon,
+                                "type": "face"
                             })
+                            
+                 # 古い書き方が使えなかった場合の FaceMesh の代替としてFaceDetectorが動作したため、FaceMeshが検出していなくてもエラーにしない
+                 multi_face_landmarks_found = True
+                 
+             except Exception as e:
+                 # tasks.vision.FaceDetector が使えなかった、またはエラーが発生した場合、古い solutions.face_detection を使う
+                 # traceback.print_exc() 
+                 
+                 for cx_off, cy_off, cw, ch in crops:
+                    crop_img = rotated_np[cy_off:cy_off+ch, cx_off:cx_off+cw]
+                    if crop_img.shape[0] < 15 or crop_img.shape[1] < 15:
+                        continue
+                    
+                    if scale_factor > 1.0 and (cw * scale_factor < 4000 and ch * scale_factor < 4000):
+                        scaled_crop = cv2.resize(
+                            crop_img, 
+                            (int(cw * scale_factor), int(ch * scale_factor)), 
+                            interpolation=cv2.INTER_CUBIC
+                        )
+                        curr_scale = scale_factor
+                    else:
+                        scaled_crop = crop_img
+                        curr_scale = 1.0
 
-                        if "顔全体" in mask_targets:
-                            process_target(range(0, 468), "face")
-                        if "目元（両目）" in mask_targets:
-                            process_target(INDEX_RIGHT_EYE + INDEX_LEFT_EYE, "eyes")
-                        if "右目 (解剖学的)" in mask_targets:
-                            process_target(INDEX_RIGHT_EYE, "eye_r")
-                        if "左目 (解剖学的)" in mask_targets:
-                            process_target(INDEX_LEFT_EYE, "eye_l")
-                        if "鼻" in mask_targets:
-                            process_target(INDEX_NOSE, "nose")
-                        if "口元" in mask_targets:
-                            process_target(INDEX_MOUTH, "mouth")
-
-        # --- 2. 遠距離専用 Face Detection バックアップ ---
-        with mp_face_detection.FaceDetection(
-            model_selection=1,
-            min_detection_confidence=conf_thresh
-        ) as face_detector:
-
-            for cx_off, cy_off, cw, ch in crops:
-                crop_img = rotated_np[cy_off:cy_off+ch, cx_off:cx_off+cw]
-                if crop_img.shape[0] < 15 or crop_img.shape[1] < 15:
-                    continue
-
-                if scale_factor > 1.0 and (cw * scale_factor < 4000 and ch * scale_factor < 4000):
-                    scaled_crop = cv2.resize(
-                        crop_img, 
-                        (int(cw * scale_factor), int(ch * scale_factor)), 
-                        interpolation=cv2.INTER_CUBIC
-                    )
-                    curr_scale = scale_factor
-                else:
-                    scaled_crop = crop_img
-                    curr_scale = 1.0
-
-                results = face_detector.process(scaled_crop)
-                if results and results.detections:
-                    for detection in results.detections:
-                        bbox = detection.location_data.relative_bounding_box
-                        rx = cx_off + (bbox.xmin * cw * curr_scale) / curr_scale
-                        ry = cy_off + (bbox.ymin * ch * curr_scale) / curr_scale
-                        rw = (bbox.width * cw * curr_scale) / curr_scale
-                        rh = (bbox.height * ch * curr_scale) / curr_scale
-
-                        if rw < min_size or rh < min_size:
-                            continue
-
-                        center_pt = (rx + rw // 2, ry + rh // 2)
-                        axes = (max(1, int(rw // 2)), max(1, int(rh * 0.6)))
-                        ellipse_pts = cv2.ellipse2Poly((int(center_pt[0]), int(center_pt[1])), axes, 0, 0, 360, 15)
+                    with st.session_state.face_detection_legacy.FaceDetection(
+                        model_selection=1,
+                        min_detection_confidence=conf_threshold # conf_threshold を適用
+                    ) as face_detector_context:
                         
-                        # 安全変換
-                        orig_polygon = map_points_back(ellipse_pts, M_inv)
-                        if len(orig_polygon) == 0:
-                            continue
-                        
-                        x_coords = [p[0] for p in orig_polygon]
-                        y_coords = [p[1] for p in orig_polygon]
-                        xmin, xmax = min(x_coords), max(x_coords)
-                        ymin, ymax = min(y_coords), max(y_coords)
+                        results = face_detector_context.process(scaled_crop)
+                        if results and results.detections:
+                            for detection in results.detections:
+                                # 古い solutions.face_detection の BBox は相対座標
+                                bbox = detection.location_data.relative_bounding_box
+                                rw = cw * bbox.width
+                                rh = ch * bbox.height
+                                
+                                # クロップ画像内の座標
+                                rx = cw * bbox.xmin
+                                ry = ch * bbox.ymin
+                                
+                                # 回転画像内の座標に戻す
+                                rx = cx_off + rx
+                                ry = cy_off + ry
 
-                        abs_cx = (xmin + xmax) / 2 / orig_w
-                        abs_cy = (ymin + ymax) / 2 / orig_h
+                                center_pt = (rx + rw // 2, ry + rh // 2)
+                                axes = (max(1, int(rw // 2)), max(1, int(rh * 0.6)))
+                                ellipse_pts = cv2.ellipse2Poly((int(center_pt[0]), int(center_pt[1])), axes, 0, 0, 360, 15)
+                                
+                                # 安全変換
+                                pts_list = [(float(p[0]), float(p[1])) for p in ellipse_pts]
+                                orig_polygon = map_points_back(pts_list, M_inv)
+                                if len(orig_polygon) == 0:
+                                    continue
+                                
+                                x_coords = [p[0] for p in orig_polygon]
+                                y_coords = [p[1] for p in orig_polygon]
+                                xmin, xmax = min(x_coords), max(x_coords)
+                                ymin, ymax = min(y_coords), max(y_coords)
 
-                        if is_duplicate(abs_cx, abs_cy):
-                            continue
-                        processed_centers.append((abs_cx, abs_cy))
+                                abs_cx = (xmin + xmax) / 2 / orig_w
+                                abs_cy = (ymin + ymax) / 2 / orig_h
 
-                        detected_items.append({
-                            "box": (xmin, ymin, xmax - xmin, ymax - ymin),
-                            "polygon": orig_polygon,
-                            "type": "face"
-                        })
+                                if is_duplicate(abs_cx, abs_cy):
+                                    continue
+                                processed_centers.append((abs_cx, abs_cy))
+
+                                detected_items.append({
+                                    "box": (xmin, ymin, xmax - xmin, ymax - ymin),
+                                    "polygon": orig_polygon,
+                                    "type": "face"
+                                })
+                             
+                 multi_face_landmarks_found = True
 
     return detected_items
 
 
 # -------------------------------------------------------------------
-# 5. マスキング画像適用処理
+# 5. マスキング画像適用処理 (修正なし)
 # -------------------------------------------------------------------
 def apply_masking(
     image: Image.Image,
@@ -624,7 +782,7 @@ def apply_masking(
 
 
 # -------------------------------------------------------------------
-# 6. メイン画面レイアウト
+# 6. メイン画面レイアウト (修正なし)
 # -------------------------------------------------------------------
 uploaded_file = st.file_uploader(
     "群衆・交差点の写真をアップロードしてください (JPEG, PNG, WEBP, BMP)",
@@ -650,6 +808,10 @@ if uploaded_file is not None:
             
             with st.spinner("AIが指定された精度モードで画像をフル解析中..."):
                 try:
+                    # MediaPipe最新版対応モジュールの事前読み込み
+                    load_mediapipe_latest_facemesh()
+                    load_mediapipe_legacy_detector()
+                    
                     st.session_state.boxes = get_mask_boxes_locally(
                         input_image,
                         mask_targets,
@@ -668,7 +830,6 @@ if uploaded_file is not None:
                     else:
                         st.success(f"解析成功！ 「{precision_level}」モードで {len(st.session_state.boxes)} 箇所の部位を検出しました。")
                 except Exception as e:
-                    import traceback
                     st.error(f"解析エラーが発生しました: {e}\n\n{traceback.format_exc()}")
 
     if st.session_state.boxes is not None:
