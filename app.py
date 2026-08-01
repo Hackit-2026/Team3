@@ -15,7 +15,7 @@ st.set_page_config(
 )
 
 st.title("🛡️ AI Smart Masking Pro Ultra")
-st.caption("通信なし・完全オフライン。Landmarker + Detector ハイブリッドエンジン ＆ 100分割超拡大スキャン搭載。")
+st.caption("通信なし・完全オフライン。Landmarker + Detector ハイブリッドエンジン ＆ 多層分割スキャン搭載。")
 
 # -------------------------------------------------------------------
 # 2. モデルファイルの自動ダウンロード ＆ ロード
@@ -26,7 +26,6 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 FACE_LANDMARKER_PATH = os.path.join(MODEL_DIR, "face_landmarker.task")
 FACE_DETECTOR_PATH = os.path.join(MODEL_DIR, "blaze_face_short_range.tflite")
 
-# 最新のGoogle公式直リンクURLに修正
 MODEL_URLS = {
     FACE_LANDMARKER_PATH: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
     FACE_DETECTOR_PATH: "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite"
@@ -38,10 +37,7 @@ def ensure_models_exist():
             filename = os.path.basename(path)
             with st.spinner(f"📦 必要なモデルファイル ({filename}) を初期ダウンロード中..."):
                 try:
-                    req = urllib.request.Request(
-                        url, 
-                        headers={'User-Agent': 'Mozilla/5.0'}
-                    )
+                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
                     with urllib.request.urlopen(req) as response, open(path, 'wb') as out_file:
                         out_file.write(response.read())
                     st.success(f"✨ {filename} のダウンロードが完了しました！")
@@ -49,8 +45,6 @@ def ensure_models_exist():
                     if filename == "face_landmarker.task":
                         st.error(f"❌ 必須モデル ({filename}) のダウンロードに失敗しました: {e}")
                         st.stop()
-                    else:
-                        st.warning(f"⚠️ サブモデル ({filename}) のダウンロードをスキップしました (Landmarker単体で動作します): {e}")
 
 ensure_models_exist()
 
@@ -61,7 +55,7 @@ def load_mediapipe_tasks():
         from mediapipe.tasks import python as mp_python
         from mediapipe.tasks.python import vision
         
-        # 精密ランドマーク用 (必須)
+        # 精密ランドマーク用
         landmarker = None
         if os.path.exists(FACE_LANDMARKER_PATH):
             base_options_lm = mp_python.BaseOptions(model_asset_path=FACE_LANDMARKER_PATH)
@@ -69,13 +63,13 @@ def load_mediapipe_tasks():
                 base_options=base_options_lm,
                 running_mode=vision.RunningMode.IMAGE,
                 num_faces=150,
-                min_face_detection_confidence=0.01,
-                min_face_presence_confidence=0.01,
-                min_tracking_confidence=0.01,
+                min_face_detection_confidence=0.15,
+                min_face_presence_confidence=0.15,
+                min_tracking_confidence=0.15,
             )
             landmarker = vision.FaceLandmarker.create_from_options(options_lm)
         
-        # 高感度検出用 (オプション)
+        # 高感度検出用
         detector = None
         if os.path.exists(FACE_DETECTOR_PATH):
             try:
@@ -83,7 +77,7 @@ def load_mediapipe_tasks():
                 options_det = vision.FaceDetectorOptions(
                     base_options=base_options_det,
                     running_mode=vision.RunningMode.IMAGE,
-                    min_detection_confidence=0.01,
+                    min_detection_confidence=0.15,
                 )
                 detector = vision.FaceDetector.create_from_options(options_det)
             except Exception:
@@ -120,26 +114,26 @@ precision_level = st.sidebar.radio(
         "超高精度（大人数・上限150人）",
         "限界突破・群衆（高密度・極小顔）",
     ],
-    index=3,
-    help="「限界突破」は100分割 ＆ 3倍超拡大ハイブリッドスキャンを行います。処理時間はかかりますが、最強の検知精度です。"
+    index=2,
+    help="大人数の場合は「超高精度」または「限界突破」をお選びください。"
 )
 
 if precision_level == "普通（標準バランス）":
     grids = [1, 2]
     scale_up_factor = 1.2
-    dup_thresh = 0.45
+    dup_thresh = 0.40
 elif precision_level == "高精度（集合写真・少人数）":
     grids = [1, 2, 3]
     scale_up_factor = 1.5
-    dup_thresh = 0.40
+    dup_thresh = 0.35
 elif precision_level == "超高精度（大人数・上限150人）":
     grids = [1, 2, 4, 6]
-    scale_up_factor = 2.2
-    dup_thresh = 0.35
-else:  # 限界突破
-    grids = [1, 2, 4, 7, 10]
-    scale_up_factor = 3.0
+    scale_up_factor = 2.0
     dup_thresh = 0.30
+else:  # 限界突破
+    grids = [1, 2, 4, 6, 8]
+    scale_up_factor = 2.5
+    dup_thresh = 0.25
 
 st.sidebar.markdown("---")
 
@@ -266,12 +260,13 @@ def get_polygon_hull_pil(pts):
     hull = lower[:-1] + upper[:-1]
     return [(int(p[0]), int(p[1])) for p in hull]
 
+
 def py_nms(items, iou_threshold):
     if not items:
         return []
 
     scores = np.array([item["score"] for item in items])
-    boxes = np.array([ [item["box"][0], item["box"][1], item["box"][0]+item["box"][2], item["box"][1]+item["box"][3]] for item in items ])
+    boxes = np.array([[item["box"][0], item["box"][1], item["box"][0]+item["box"][2], item["box"][1]+item["box"][3]] for item in items])
 
     x1 = boxes[:, 0]
     y1 = boxes[:, 1]
@@ -306,13 +301,13 @@ def py_nms(items, iou_threshold):
     return keep
 
 # -------------------------------------------------------------------
-# 5. ハイブリッド検出 ＆ 限界突破スキャンエンジン
+# 5. ハイブリッド検出 ＆ 多層スキャンエンジン
 # -------------------------------------------------------------------
 def get_mask_boxes_locally(
     image: Image.Image,
     mask_targets: list,
     grids: list,
-    scale_factor: float = 3.0,
+    scale_factor: float = 2.0,
     dup_thresh: float = 0.30,
 ):
     if landmarker is None:
@@ -334,8 +329,8 @@ def get_mask_boxes_locally(
             continue
         step_x = orig_w // g
         step_y = orig_h // g
-        overlap_x = int(step_x * 0.45)
-        overlap_y = int(step_y * 0.45)
+        overlap_x = int(step_x * 0.40)
+        overlap_y = int(step_y * 0.40)
 
         for i in range(g):
             for j in range(g):
@@ -350,11 +345,12 @@ def get_mask_boxes_locally(
 
     for idx, (cx_off, cy_off, cw, ch) in enumerate(crops):
         progress_bar.progress(int((idx + 1) / num_crops * 100), text=f"画像を分割スキャン中... ({idx+1}/{num_crops})")
-        if cw < 10 or ch < 10: continue
+        if cw < 10 or ch < 10:
+            continue
 
         crop_pil = image.crop((cx_off, cy_off, cx_off + cw, cy_off + ch))
 
-        if scale_factor > 1.0 and (cw * scale_factor < 6000 and ch * scale_factor < 6000):
+        if scale_factor > 1.0 and (cw * scale_factor < 5000 and ch * scale_factor < 5000):
             scaled_crop = crop_pil.resize((int(cw * scale_factor), int(ch * scale_factor)), Image.Resampling.BICUBIC)
             curr_scale = scale_factor
         else:
@@ -364,7 +360,7 @@ def get_mask_boxes_locally(
         crop_np = np.array(scaled_crop)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(crop_np))
 
-        # --- A. FaceDetector (利用可能な場合) ---
+        # --- A. FaceDetector ---
         if detector is not None:
             try:
                 result_det = detector.detect(mp_image)
@@ -377,32 +373,37 @@ def get_mask_boxes_locally(
                         real_w = bbox.width / curr_scale
                         real_h = bbox.height / curr_scale
 
-                        if real_w < 3 or real_h < 3: continue
+                        # 🛡️ 安全フィルター：小さすぎる/写真全体レベルに巨大すぎるものは除外
+                        if real_w < 4 or real_h < 4:
+                            continue
+                        if real_w > orig_w * 0.6 or real_h > orig_h * 0.6:
+                            continue
 
-                        center_pt = (real_x + real_w/2, real_y + real_h/2)
+                        center_pt = (real_x + real_w / 2, real_y + real_h / 2)
                         axes = (max(1, int(real_w / 2 * 1.1)), max(1, int(real_h * 0.7)))
-                        num_pts = 20
+                        num_pts = 16
                         ellipse_pts = []
                         for i in range(num_pts):
                             angle = 2 * math.pi * i / num_pts
-                            ellipse_pts.append((center_pt[0] + axes[0]*math.cos(angle), center_pt[1] + axes[1]*math.sin(angle)))
+                            ellipse_pts.append((center_pt[0] + axes[0] * math.cos(angle), center_pt[1] + axes[1] * math.sin(angle)))
 
                         all_raw_items.append({
                             "box": (real_x, real_y, real_w, real_h),
                             "center": center_pt,
                             "polygon": get_polygon_hull_pil(ellipse_pts),
+                            "raw_pts": None,
                             "score": score,
                             "engine": "detector",
-                            "indices": None
                         })
-            except: pass
+            except Exception:
+                pass
 
         # --- B. FaceLandmarker ---
         try:
             result_lm = landmarker.detect(mp_image)
             if result_lm and result_lm.face_landmarks:
                 for face_landmarks in result_lm.face_landmarks:
-                    score = sum([lm.presence for lm in face_landmarks]) / len(face_landmarks)
+                    score = sum([getattr(lm, 'presence', 1.0) for lm in face_landmarks]) / len(face_landmarks)
                     
                     orig_pts_all = []
                     for lm in face_landmarks:
@@ -410,31 +411,31 @@ def get_mask_boxes_locally(
                         ly = getattr(lm, 'y', lm['y'] if isinstance(lm, dict) else 0)
                         orig_pts_all.append((cx_off + (lx * cw * curr_scale) / curr_scale, cy_off + (ly * ch * curr_scale) / curr_scale))
 
-                    if len(orig_pts_all) < 10: continue
+                    if len(orig_pts_all) < 10:
+                        continue
 
                     x_coords = [p[0] for p in orig_pts_all]
                     y_coords = [p[1] for p in orig_pts_all]
                     xmin, xmax = min(x_coords), max(x_coords)
                     ymin, ymax = min(y_coords), max(y_coords)
                     real_w, real_h = xmax - xmin, ymax - ymin
-                    if real_w < 3 or real_h < 3: continue
+
+                    # 🛡️ 安全フィルター
+                    if real_w < 4 or real_h < 4:
+                        continue
+                    if real_w > orig_w * 0.6 or real_h > orig_h * 0.6:
+                        continue
 
                     all_raw_items.append({
                         "box": (xmin, ymin, real_w, real_h),
-                        "center": ((xmin+xmax)/2, (ymin+ymax)/2),
+                        "center": ((xmin + xmax) / 2, (ymin + ymax) / 2),
                         "polygon": get_polygon_hull_pil(orig_pts_all),
+                        "raw_pts": orig_pts_all,  # ランドマーク全点を保持
                         "score": score + 0.5,
                         "engine": "landmarker",
-                        "indices": {
-                            "all": range(len(orig_pts_all)),
-                            "eyes": INDEX_RIGHT_EYE + INDEX_LEFT_EYE,
-                            "eye_r": INDEX_RIGHT_EYE,
-                            "eye_l": INDEX_LEFT_EYE,
-                            "nose": INDEX_NOSE,
-                            "mouth": INDEX_MOUTH
-                        }
                     })
-        except: pass
+        except Exception:
+            pass
 
     progress_bar.empty()
     
@@ -446,28 +447,41 @@ def get_mask_boxes_locally(
 
     detected_items = []
     for item in kept_items:
-        if item["indices"] is None:
+        raw_pts = item.get("raw_pts")
+
+        # Detector 由来（パーツ非対応）の場合
+        if raw_pts is None:
             if "顔全体" in mask_targets:
                 detected_items.append({"box": item["box"], "polygon": item["polygon"], "type": "face"})
             continue
 
-        indices_map = item["indices"]
-        def process_target(indices_key, target_type):
-            target_pts = [ item["polygon"][i] for i in indices_map[indices_key] if i < len(item["polygon"]) ]
-            if not target_pts: return
+        # Landmarker 由来の場合（パーツ対応）
+        def process_target(indices, target_type):
+            target_pts = [raw_pts[i] for i in indices if i < len(raw_pts)]
+            if not target_pts:
+                return
             x_coords = [p[0] for p in target_pts]
             y_coords = [p[1] for p in target_pts]
-            w, h = max(x_coords)-min(x_coords), max(y_coords)-min(y_coords)
-            if w < 2 or h < 2: return
-            detected_items.append({"box": (min(x_coords), min(y_coords), w, h), "polygon": get_polygon_hull_pil(target_pts), "type": target_type})
+            xmin, xmax = min(x_coords), max(x_coords)
+            ymin, ymax = min(y_coords), max(y_coords)
+            w, h = xmax - xmin, ymax - ymin
+            if w < 2 or h < 2:
+                return
+            poly = get_polygon_hull_pil(target_pts)
+            detected_items.append({"box": (xmin, ymin, w, h), "polygon": poly, "type": target_type})
 
         if "顔全体" in mask_targets:
             detected_items.append({"box": item["box"], "polygon": item["polygon"], "type": "face"})
-        if "目元（両目）" in mask_targets: process_target("eyes", "eyes")
-        if "右目 (解剖学的)" in mask_targets: process_target("eye_r", "eye_r")
-        if "左目 (解剖学的)" in mask_targets: process_target("eye_l", "eye_l")
-        if "鼻" in mask_targets: process_target("nose", "nose")
-        if "口元" in mask_targets: process_target("mouth", "mouth")
+        if "目元（両目）" in mask_targets:
+            process_target(INDEX_RIGHT_EYE + INDEX_LEFT_EYE, "eyes")
+        if "右目 (解剖学的)" in mask_targets:
+            process_target(INDEX_RIGHT_EYE, "eye_r")
+        if "左目 (解剖学的)" in mask_targets:
+            process_target(INDEX_LEFT_EYE, "eye_l")
+        if "鼻" in mask_targets:
+            process_target(INDEX_NOSE, "nose")
+        if "口元" in mask_targets:
+            process_target(INDEX_MOUTH, "mouth")
 
     return detected_items
 
@@ -523,7 +537,8 @@ def apply_masking(
         bottom = max(0, min(img_h, int(by + bh)))
         box_w, box_h = right - left, bottom - top
 
-        if box_w <= 0 or box_h <= 0: continue
+        if box_w <= 0 or box_h <= 0:
+            continue
 
         cx, cy = left + box_w / 2, top + box_h / 2
         masked_box = result_img.crop((left, top, right, bottom))
@@ -543,7 +558,8 @@ def apply_masking(
         elif mask_type == "絵文字スタンプ":
             target_size = max(int(max(box_w, box_h) * 0.9), min(int(max(box_w, box_h) * 1.15 * (emoji_scale / 100.0)), int(max(box_w, box_h) * 2.2)))
             emoji_img = create_cropped_emoji_image(emoji_char, target_size=target_size)
-            if emoji_angle != 0: emoji_img = emoji_img.rotate(-emoji_angle, expand=True, resample=Image.Resampling.BICUBIC)
+            if emoji_angle != 0:
+                emoji_img = emoji_img.rotate(-emoji_angle, expand=True, resample=Image.Resampling.BICUBIC)
             ew, eh = emoji_img.size
             result_img.paste(emoji_img, (int(cx - ew / 2 + offset_x), int(cy - eh / 2 + offset_y)), emoji_img)
             continue
@@ -577,13 +593,10 @@ if uploaded_file is not None:
 
     input_image = Image.open(uploaded_file).convert("RGB")
 
-    if st.button("🚀 ローカル AI で解析を開始（限界突破モードは時間がかかります）", type="primary"):
+    if st.button("🚀 ローカル AI で解析を開始", type="primary"):
         if not mask_targets:
             st.warning("⚠️ 「マスク対象」を少なくとも1つ選択してください。")
         else:
-            if precision_level == "限界突破・群衆（高密度・極小顔）":
-                st.info("⚠️ 【限界突破モード】 画像を100分割し、ハイブリッド超拡大スキャンを行います。しばらくお待ちください。")
-            
             with st.spinner("AIがフル解析中..."):
                 try:
                     st.session_state.boxes = get_mask_boxes_locally(
@@ -597,7 +610,7 @@ if uploaded_file is not None:
                     if not st.session_state.boxes:
                         st.info("顔が検出されませんでした。精度モードを上げるか、別の画像をお試しください。")
                     else:
-                        st.success(f"解析成功！ 「{precision_level}」モードで {len(st.session_state.boxes)} 箇所の部位を検出し、重複を統合しました。")
+                        st.success(f"解析成功！ 「{precision_level}」モードで {len(st.session_state.boxes)} 箇所の部位を検出しました。")
                 except Exception as e:
                     st.error(f"解析エラーが発生しました: {e}")
                     st.text(traceback.format_exc())
@@ -647,7 +660,7 @@ if uploaded_file is not None:
                 st.download_button(
                     label="💾 加工画像をダウンロード",
                     data=buf.getvalue(),
-                    file_name="ultra_masked.png",
+                    file_name="masked_result.png",
                     mime="image/png",
                     use_container_width=True,
                     type="primary",
