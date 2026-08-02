@@ -18,6 +18,17 @@ import {
   Pencil,
   Trash2,
 } from 'lucide-react';
+import {
+  fetchWhitelist,
+  saveWhitelistFace,
+  deleteWhitelistFace,
+  blobUrlFromBase64,
+  detectFaces,
+  detectText,
+  type ScanMode,
+  type DetectedFace,
+} from './api';
+import { applyMosaicToRegion, type MosaicShape, type MosaicStyleConfig } from './mosaic';
 
 // ==========================================
 // 型定義
@@ -36,6 +47,10 @@ interface DetectedString {
   text: string;
   type: 'phone' | 'address' | 'other' | 'ignore';
   label: string;
+  // モザイク描画用の座標(コア処理から取得。一覧表示では使わない)。
+  box: [number, number, number, number];
+  // ユーザーが一覧のチェックボックスで手動ON/OFFできるモザイク適用状態。
+  masked: boolean;
 }
 
 // ==========================================
@@ -62,9 +77,22 @@ export default function App() {
 
   // グローバルな状態（ホワイトリスト）
   const [whitelistEnabled, setWhitelistEnabled] = useState<boolean>(true);
-  const [whitelistFaces, setWhitelistFaces] = useState<FaceData[]>([
-    { id: 1, name: 'Taro', imgUrl: '👤' }, // モックデータ
-  ]);
+  const [whitelistFaces, setWhitelistFaces] = useState<FaceData[]>([]);
+
+  // 起動時にバックエンドの登録済みホワイトリストを読み込む。
+  useEffect(() => {
+    fetchWhitelist()
+      .then((entries) => {
+        setWhitelistFaces(
+          entries.map((entry) => ({
+            id: Number(entry.id),
+            name: entry.name,
+            imgUrl: blobUrlFromBase64(entry.thumb_base64),
+          })),
+        );
+      })
+      .catch((err) => console.error('ホワイトリストの読み込みに失敗しました', err));
+  }, []);
 
   const navigate = (screen: ScreenType) => setCurrentScreen(screen);
 
@@ -96,6 +124,8 @@ export default function App() {
             navigate={navigate}
             selectedMosaic={selectedMosaic}
             uploadedImage={uploadedImage}
+            whitelistEnabled={whitelistEnabled}
+            whitelistFaces={whitelistFaces}
           />
         )}
       </div>
@@ -113,6 +143,9 @@ const MOSAIC_TYPES: { id: MosaicId; label: string }[] = [
   { id: 'fill', label: '塗りつぶし' },
   { id: 'tile', label: 'タイル状モザイク（グリッド）' },
 ];
+
+// 顔のマスク対象パーツ(バックエンドのface_engine.pyと同じ文言をそのまま使う)。
+const MASK_PART_OPTIONS = ['顔全体', '目元（両目）', '右目 (解剖学的)', '左目 (解剖学的)', '鼻', '口元'];
 
 interface HomeScreenProps {
   navigate: (screen: ScreenType) => void;
@@ -225,18 +258,25 @@ const WhitelistScreen: React.FC<WhitelistScreenProps> = ({
     setNameError(false);
   };
 
-  const handleSaveFace = () => {
+  const handleSaveFace = async () => {
     if (!name) {
       setNameError(true);
       return;
     }
-    // TODO: ここにコア処理へホワイトリスト登録・更新するロジックを追加
+    const id = editingId ?? Date.now();
+    try {
+      await saveWhitelistFace(String(id), name, previewImg);
+    } catch (err) {
+      console.error('ホワイトリストの保存に失敗しました', err);
+      window.alert('ホワイトリストの保存に失敗しました。バックエンドの接続を確認してください。');
+      return;
+    }
     if (editingId !== null) {
       setFaces(
         faces.map((f) => (f.id === editingId ? { ...f, name, imgUrl: previewImg || f.imgUrl } : f)),
       );
     } else {
-      const newFace: FaceData = { id: Date.now(), name, imgUrl: previewImg || '👤' };
+      const newFace: FaceData = { id, name, imgUrl: previewImg || '👤' };
       setFaces([...faces, newFace]);
     }
     resetForm();
@@ -249,9 +289,15 @@ const WhitelistScreen: React.FC<WhitelistScreenProps> = ({
     setNameError(false);
   };
 
-  const handleDeleteFace = (id: number) => {
-    // TODO: ここにコア処理へホワイトリスト削除を反映するロジックを追加
+  const handleDeleteFace = async (id: number) => {
     if (!window.confirm('この顔をホワイトリストから削除しますか？')) return;
+    try {
+      await deleteWhitelistFace(String(id));
+    } catch (err) {
+      console.error('ホワイトリストの削除に失敗しました', err);
+      window.alert('ホワイトリストの削除に失敗しました。バックエンドの接続を確認してください。');
+      return;
+    }
     setFaces(faces.filter((f) => f.id !== id));
     if (editingId === id) resetForm();
   };
@@ -456,6 +502,8 @@ interface ProcessingScreenProps {
   navigate: (screen: ScreenType) => void;
   selectedMosaic: MosaicId;
   uploadedImage: string | null;
+  whitelistEnabled: boolean;
+  whitelistFaces: FaceData[];
 }
 
 const STRING_TYPE_STYLE: Record<DetectedString['type'], { badge: string; icon: React.ReactNode }> = {
@@ -465,48 +513,310 @@ const STRING_TYPE_STYLE: Record<DetectedString['type'], { badge: string; icon: R
   ignore: { badge: 'bg-gray-50 text-gray-400', icon: <EyeOff className="h-3 w-3" /> },
 };
 
-const ProcessingScreen: React.FC<ProcessingScreenProps> = ({ navigate, selectedMosaic, uploadedImage }) => {
+interface EmojiConfigState {
+  text: string;
+  scale: number;
+  rotate: number;
+  offsetX: number;
+  offsetY: number;
+}
+
+interface MosaicStyleFieldsProps {
+  mosaic: MosaicId;
+  intensity: number;
+  setIntensity: (v: number) => void;
+  fillColor: string;
+  setFillColor: (v: string) => void;
+  emoji: EmojiConfigState;
+  setEmoji: (v: EmojiConfigState) => void;
+}
+
+// 顔用・文字列用で共通の「スタイル詳細設定」欄（粗さ・色・絵文字など）。
+const MosaicStyleFields: React.FC<MosaicStyleFieldsProps> = ({
+  mosaic,
+  intensity,
+  setIntensity,
+  fillColor,
+  setFillColor,
+  emoji,
+  setEmoji,
+}) => (
+  <div className="rounded-xl border border-gray-100 bg-gray-50 p-3.5">
+    <p className="mb-3 border-b border-gray-200 pb-2 text-xs font-bold text-emerald-700">
+      スタイル詳細設定（{MOSAIC_TYPES.find((m) => m.id === mosaic)?.label}）
+    </p>
+
+    {mosaic === 'emoji' ? (
+      <div className="space-y-3">
+        <div>
+          <label className={labelClass}>絵文字の選択</label>
+          <input
+            type="text"
+            value={emoji.text}
+            onChange={(e) => setEmoji({ ...emoji, text: e.target.value })}
+            className={`${inputClass} text-xl`}
+          />
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className={labelClass}>倍率（{emoji.scale}%）</label>
+            <input
+              type="range"
+              min="10"
+              max="200"
+              value={emoji.scale}
+              onChange={(e) => setEmoji({ ...emoji, scale: Number(e.target.value) })}
+              className="w-full accent-emerald-500"
+            />
+          </div>
+          <div>
+            <label className={labelClass}>回転角度（{emoji.rotate}°）</label>
+            <input
+              type="range"
+              min="0"
+              max="360"
+              value={emoji.rotate}
+              onChange={(e) => setEmoji({ ...emoji, rotate: Number(e.target.value) })}
+              className="w-full accent-emerald-500"
+            />
+          </div>
+          <div>
+            <label className={labelClass}>上下位置調整（{emoji.offsetY}）</label>
+            <input
+              type="range"
+              min="-50"
+              max="50"
+              value={emoji.offsetY}
+              onChange={(e) => setEmoji({ ...emoji, offsetY: Number(e.target.value) })}
+              className="w-full accent-emerald-500"
+            />
+          </div>
+          <div>
+            <label className={labelClass}>左右位置調整（{emoji.offsetX}）</label>
+            <input
+              type="range"
+              min="-50"
+              max="50"
+              value={emoji.offsetX}
+              onChange={(e) => setEmoji({ ...emoji, offsetX: Number(e.target.value) })}
+              className="w-full accent-emerald-500"
+            />
+          </div>
+        </div>
+      </div>
+    ) : (
+      <div className="space-y-3">
+        <div>
+          <label className={labelClass}>粗さ・強度（{intensity}）</label>
+          <input
+            type="range"
+            min="1"
+            max="100"
+            value={intensity}
+            onChange={(e) => setIntensity(Number(e.target.value))}
+            className="w-full accent-emerald-500"
+          />
+        </div>
+        {mosaic === 'fill' && (
+          <div>
+            <label className={labelClass}>塗りつぶし色</label>
+            <input
+              type="color"
+              value={fillColor}
+              onChange={(e) => setFillColor(e.target.value)}
+              className="h-9 w-full cursor-pointer rounded-lg border border-gray-200"
+            />
+          </div>
+        )}
+      </div>
+    )}
+  </div>
+);
+
+const ProcessingScreen: React.FC<ProcessingScreenProps> = ({
+  navigate,
+  selectedMosaic,
+  uploadedImage,
+  whitelistEnabled,
+  whitelistFaces,
+}) => {
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [processedImage, setProcessedImage] = useState<string | null>(uploadedImage);
+  const [detectedStrings, setDetectedStrings] = useState<DetectedString[]>([]);
 
-  // 検出結果リストのモックデータ（コア処理完了後にこれを更新する想定）
-  const [detectedStrings, setDetectedStrings] = useState<DetectedString[]>([
-    { id: 1, text: '090-XXXX-XXXX', type: 'phone', label: '機密（電話番号）' },
-    { id: 2, text: '東京都千代田区...', type: 'address', label: '個人情報（住所）' },
-  ]);
-  // setProcessedImage / setDetectedStrings は下記 handleApplyProcess のコア処理連携で
-  // 使う想定のため、現時点では未使用でも残す（noUnusedLocals対策で明示的に参照）。
-  void setProcessedImage;
-  void setDetectedStrings;
+  // この処理画面だけで有効にするホワイトリスト対象者(既定は全員ON)。
+  const [enabledWhitelistIds, setEnabledWhitelistIds] = useState<Set<number>>(
+    () => new Set(whitelistFaces.map((f) => f.id)),
+  );
+  const toggleWhitelistFace = (id: number) => {
+    setEnabledWhitelistIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+  const setAllWhitelistFaces = (enabled: boolean) => {
+    setEnabledWhitelistIds(enabled ? new Set(whitelistFaces.map((f) => f.id)) : new Set());
+  };
 
   // モザイク設定のState群（これらをコア処理に渡す）
   const [detectMode, setDetectMode] = useState<string>('顔 + 文字列');
   const [maskTarget, setMaskTarget] = useState<string>('未登録の顔のみ');
   const [maskShape, setMaskShape] = useState<string>('長方形');
+  const [faceAccuracy, setFaceAccuracy] = useState<string>('標準');
+  const [maskTargetParts, setMaskTargetParts] = useState<string[]>(['顔全体']);
+  const toggleMaskPart = (part: string) => {
+    setMaskTargetParts((prev) => (prev.includes(part) ? prev.filter((p) => p !== part) : [...prev, part]));
+  };
 
-  const [intensity, setIntensity] = useState<number>(50);
-  const [fillColor, setFillColor] = useState<string>('#16a34a');
-  const [emojiConfig, setEmojiConfig] = useState({ text: '😎', scale: 100, rotate: 0, offsetX: 0, offsetY: 0 });
+  // 顔用・文字列用でモザイクの種類とスタイル詳細をそれぞれ独立に持つ。
+  const [faceMosaic, setFaceMosaic] = useState<MosaicId>(selectedMosaic);
+  const [faceIntensity, setFaceIntensity] = useState<number>(50);
+  const [faceFillColor, setFaceFillColor] = useState<string>('#16a34a');
+  const [faceEmoji, setFaceEmoji] = useState<EmojiConfigState>({
+    text: '😎',
+    scale: 100,
+    rotate: 0,
+    offsetX: 0,
+    offsetY: 0,
+  });
+
+  const [textMosaic, setTextMosaic] = useState<MosaicId>(selectedMosaic);
+  const [textIntensity, setTextIntensity] = useState<number>(50);
+  const [textFillColor, setTextFillColor] = useState<string>('#16a34a');
+  const [textEmoji, setTextEmoji] = useState<EmojiConfigState>({
+    text: '😎',
+    scale: 100,
+    rotate: 0,
+    offsetX: 0,
+    offsetY: 0,
+  });
+
+  // マスクの形状ドロップダウンの表示文言 → mosaic.ts のshape値への対応。
+  const MASK_SHAPE_MAP: Record<string, MosaicShape> = {
+    長方形: 'rect',
+    円形: 'circle',
+    顔の輪郭に合わせる: 'contour',
+  };
+
+  // 顔検出の精度ドロップダウンの表示文言 → バックエンドのscan_mode値への対応。
+  const FACE_ACCURACY_MAP: Record<string, ScanMode> = {
+    標準: 'standard',
+    高精度: 'high',
+  };
+
+  // 検出済みの顔一覧(再描画のために保持。顔は一覧のON/OFFトグル対象外)。
+  const [faceRegions, setFaceRegions] = useState<DetectedFace[]>([]);
+
+  // 元画像＋現在の検出結果＋現在のスタイル設定から、Canvasに描き直す。
+  // 文字列一覧のチェックボックスでON/OFFを切り替えるたびに呼び直す。
+  const redrawCanvas = async (faces: DetectedFace[], strings: DetectedString[]) => {
+    if (!uploadedImage) return;
+
+    const img = new Image();
+    const imgLoaded = new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error('画像の読み込みに失敗しました'));
+    });
+    img.src = uploadedImage;
+    await imgLoaded;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Canvasの初期化に失敗しました');
+    ctx.drawImage(img, 0, 0);
+
+    const faceStyleConfig: MosaicStyleConfig = {
+      style: faceMosaic,
+      shape: MASK_SHAPE_MAP[maskShape] ?? 'rect',
+      intensity: faceIntensity,
+      fillColor: faceFillColor,
+      emoji: faceEmoji,
+    };
+    for (const face of faces) {
+      applyMosaicToRegion(ctx, img, { box: face.box, polygon: face.polygon }, faceStyleConfig);
+    }
+
+    // 文字列は形状ドロップダウン(顔用)に関わらず常に長方形でマスクする
+    // （円形/輪郭クリップだと隅の文字が隠れずに残ってしまうため）。
+    const textStyleConfig: MosaicStyleConfig = {
+      style: textMosaic,
+      shape: 'rect',
+      intensity: textIntensity,
+      fillColor: textFillColor,
+      emoji: textEmoji,
+    };
+    for (const str of strings) {
+      if (str.masked) {
+        applyMosaicToRegion(ctx, img, { box: str.box }, textStyleConfig);
+      }
+    }
+
+    setProcessedImage(canvas.toDataURL('image/png'));
+  };
 
   // コア処理実行フック
   const handleApplyProcess = async () => {
+    if (!uploadedImage) return;
     setIsProcessing(true);
 
     try {
-      // TODO: ここに既存のコア処理（画像解析・モザイク適用）を呼び出します。
-      // 引数として uploadedImage や 各種State(detectMode, emojiConfig等) を渡してください。
-      // 例: const resultUrl = await coreProcess(uploadedImage, { ... });
+      const sourceBlob = await (await fetch(uploadedImage)).blob();
 
-      // モックとして1秒待機
-      await new Promise((res) => setTimeout(res, 1000));
+      const includeFaces = detectMode !== '文字列のみ';
+      const includeText = detectMode !== '顔のみ';
 
-      // TODO: コア処理が終わったら結果URLを setProcessedImage にセットします
-      // setProcessedImage(resultUrl);
+      const [faceResult, textResult] = await Promise.all([
+        includeFaces
+          ? detectFaces(
+              sourceBlob,
+              whitelistEnabled && maskTarget === '未登録の顔のみ',
+              FACE_ACCURACY_MAP[faceAccuracy] ?? 'standard',
+              maskTargetParts,
+              [...enabledWhitelistIds].map(String),
+            )
+          : Promise.resolve(null),
+        includeText ? detectText(sourceBlob) : Promise.resolve(null),
+      ]);
+
+      const faces = faceResult ? faceResult.faces : [];
+      // 検出直後の初期状態は、LLM判定のprivate/publicをそのままON/OFFの初期値にする。
+      const strings: DetectedString[] = textResult
+        ? textResult.texts.map((t, i) => {
+            const isPrivate = t.label === 'private';
+            return {
+              id: i + 1,
+              text: t.text,
+              type: isPrivate ? 'other' : 'ignore',
+              label: isPrivate ? '非公開（マスク対象）' : '公開情報（マスクなし）',
+              box: [t.x, t.y, t.w, t.h] as [number, number, number, number],
+              masked: isPrivate,
+            };
+          })
+        : [];
+
+      setFaceRegions(faces);
+      setDetectedStrings(strings);
+      await redrawCanvas(faces, strings);
     } catch (error) {
       console.error('処理エラー', error);
+      window.alert('モザイク処理に失敗しました。バックエンドの接続を確認してください。');
     } finally {
       setIsProcessing(false);
     }
+  };
+
+  // 検出された文字列一覧のチェックボックスでモザイクON/OFFを切り替える。
+  const handleToggleStringMask = (id: number) => {
+    const updated = detectedStrings.map((s) => (s.id === id ? { ...s, masked: !s.masked } : s));
+    setDetectedStrings(updated);
+    redrawCanvas(faceRegions, updated).catch((error) => {
+      console.error('再描画エラー', error);
+      window.alert('モザイクの再描画に失敗しました。');
+    });
   };
 
   // 保存処理フック
@@ -593,104 +903,151 @@ const ProcessingScreen: React.FC<ProcessingScreenProps> = ({ navigate, selectedM
             </div>
 
             <div>
-              <label className={labelClass}>マスクの形状</label>
-              <select value={maskShape} onChange={(e) => setMaskShape(e.target.value)} className={inputClass}>
-                <option>長方形</option>
-                <option>円形</option>
-                <option>顔の輪郭に合わせる</option>
+              <label className={labelClass}>顔検出の精度</label>
+              <select
+                value={faceAccuracy}
+                onChange={(e) => setFaceAccuracy(e.target.value)}
+                className={inputClass}
+              >
+                <option>標準</option>
+                <option>高精度</option>
               </select>
             </div>
 
-            <div className="rounded-xl border border-gray-100 bg-gray-50 p-3.5">
-              <p className="mb-3 border-b border-gray-200 pb-2 text-xs font-bold text-emerald-700">
-                スタイル詳細設定（{MOSAIC_TYPES.find((m) => m.id === selectedMosaic)?.label}）
-              </p>
+            <div className="border-t border-gray-100 pt-4">
+              <p className="mb-3 text-xs font-bold text-gray-500">顔のモザイク</p>
+              <div className="space-y-3">
+                <div>
+                  <label className={labelClass}>モザイクの種類</label>
+                  <select
+                    value={faceMosaic}
+                    onChange={(e) => setFaceMosaic(e.target.value as MosaicId)}
+                    className={inputClass}
+                  >
+                    {MOSAIC_TYPES.map((type) => (
+                      <option key={type.id} value={type.id}>
+                        {type.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
 
-              {selectedMosaic === 'emoji' ? (
-                <div className="space-y-3">
-                  <div>
-                    <label className={labelClass}>絵文字の選択</label>
-                    <input
-                      type="text"
-                      value={emojiConfig.text}
-                      onChange={(e) => setEmojiConfig({ ...emojiConfig, text: e.target.value })}
-                      className={`${inputClass} text-xl`}
-                    />
-                  </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className={labelClass}>倍率（{emojiConfig.scale}%）</label>
-                      <input
-                        type="range"
-                        min="10"
-                        max="200"
-                        value={emojiConfig.scale}
-                        onChange={(e) => setEmojiConfig({ ...emojiConfig, scale: Number(e.target.value) })}
-                        className="w-full accent-emerald-500"
-                      />
-                    </div>
-                    <div>
-                      <label className={labelClass}>回転角度（{emojiConfig.rotate}°）</label>
-                      <input
-                        type="range"
-                        min="0"
-                        max="360"
-                        value={emojiConfig.rotate}
-                        onChange={(e) => setEmojiConfig({ ...emojiConfig, rotate: Number(e.target.value) })}
-                        className="w-full accent-emerald-500"
-                      />
-                    </div>
-                    <div>
-                      <label className={labelClass}>上下位置調整（{emojiConfig.offsetY}）</label>
-                      <input
-                        type="range"
-                        min="-50"
-                        max="50"
-                        value={emojiConfig.offsetY}
-                        onChange={(e) => setEmojiConfig({ ...emojiConfig, offsetY: Number(e.target.value) })}
-                        className="w-full accent-emerald-500"
-                      />
-                    </div>
-                    <div>
-                      <label className={labelClass}>左右位置調整（{emojiConfig.offsetX}）</label>
-                      <input
-                        type="range"
-                        min="-50"
-                        max="50"
-                        value={emojiConfig.offsetX}
-                        onChange={(e) => setEmojiConfig({ ...emojiConfig, offsetX: Number(e.target.value) })}
-                        className="w-full accent-emerald-500"
-                      />
-                    </div>
+                <div>
+                  <label className={labelClass}>マスク対象パーツ</label>
+                  <div className="flex flex-wrap gap-x-3 gap-y-1.5">
+                    {MASK_PART_OPTIONS.map((part) => (
+                      <label key={part} className="flex items-center gap-1.5 text-sm text-gray-700">
+                        <input
+                          type="checkbox"
+                          checked={maskTargetParts.includes(part)}
+                          onChange={() => toggleMaskPart(part)}
+                          className="h-4 w-4 accent-emerald-500"
+                        />
+                        {part}
+                      </label>
+                    ))}
                   </div>
                 </div>
-              ) : (
-                <div className="space-y-3">
-                  <div>
-                    <label className={labelClass}>粗さ・強度（{intensity}）</label>
-                    <input
-                      type="range"
-                      min="1"
-                      max="100"
-                      value={intensity}
-                      onChange={(e) => setIntensity(Number(e.target.value))}
-                      className="w-full accent-emerald-500"
-                    />
-                  </div>
-                  {selectedMosaic === 'fill' && (
-                    <div>
-                      <label className={labelClass}>塗りつぶし色</label>
-                      <input
-                        type="color"
-                        value={fillColor}
-                        onChange={(e) => setFillColor(e.target.value)}
-                        className="h-9 w-full cursor-pointer rounded-lg border border-gray-200"
-                      />
-                    </div>
-                  )}
+
+                <div>
+                  <label className={labelClass}>マスクの形状</label>
+                  <select value={maskShape} onChange={(e) => setMaskShape(e.target.value)} className={inputClass}>
+                    <option>長方形</option>
+                    <option>円形</option>
+                    <option>顔の輪郭に合わせる</option>
+                  </select>
                 </div>
-              )}
+
+                <MosaicStyleFields
+                  mosaic={faceMosaic}
+                  intensity={faceIntensity}
+                  setIntensity={setFaceIntensity}
+                  fillColor={faceFillColor}
+                  setFillColor={setFaceFillColor}
+                  emoji={faceEmoji}
+                  setEmoji={setFaceEmoji}
+                />
+              </div>
             </div>
+
+            <div className="border-t border-gray-100 pt-4">
+              <p className="mb-3 text-xs font-bold text-gray-500">文字列のモザイク</p>
+              <div className="space-y-3">
+                <div>
+                  <label className={labelClass}>モザイクの種類</label>
+                  <select
+                    value={textMosaic}
+                    onChange={(e) => setTextMosaic(e.target.value as MosaicId)}
+                    className={inputClass}
+                  >
+                    {MOSAIC_TYPES.map((type) => (
+                      <option key={type.id} value={type.id}>
+                        {type.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <MosaicStyleFields
+                  mosaic={textMosaic}
+                  intensity={textIntensity}
+                  setIntensity={setTextIntensity}
+                  fillColor={textFillColor}
+                  setFillColor={setTextFillColor}
+                  emoji={textEmoji}
+                  setEmoji={setTextEmoji}
+                />
+              </div>
+            </div>
+          </div>
+        </details>
+
+        <details className="group mb-3 overflow-hidden rounded-2xl border border-gray-100">
+          <summary className="flex cursor-pointer list-none items-center justify-between bg-gray-50 p-3 text-sm font-bold text-gray-800">
+            <span className="flex items-center gap-2">
+              <Users className="h-4 w-4 text-emerald-500" />
+              ホワイトリスト対象者（{enabledWhitelistIds.size}/{whitelistFaces.length}）
+            </span>
+            <ChevronDown className="h-4 w-4 text-gray-400 transition-transform group-open:rotate-180" />
+          </summary>
+          <div className="p-3.5">
+            {whitelistFaces.length > 0 ? (
+              <>
+                <div className="mb-3 flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setAllWhitelistFaces(true)}
+                    className={`${secondaryBtn} flex-1 py-2 text-xs`}
+                  >
+                    全員ON
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAllWhitelistFaces(false)}
+                    className={`${secondaryBtn} flex-1 py-2 text-xs`}
+                  >
+                    全員OFF
+                  </button>
+                </div>
+                <ul className="space-y-2">
+                  {whitelistFaces.map((face) => (
+                    <li key={face.id} className="flex items-center rounded-xl border border-gray-100 px-3 py-2">
+                      <label className="flex w-full cursor-pointer items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={enabledWhitelistIds.has(face.id)}
+                          onChange={() => toggleWhitelistFace(face.id)}
+                          className="h-4 w-4 accent-emerald-500"
+                        />
+                        <span className="truncate text-sm text-gray-700">{face.name}</span>
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : (
+              <p className="py-4 text-center text-sm text-gray-400">登録済みのホワイトリストはありません</p>
+            )}
           </div>
         </details>
 
@@ -712,7 +1069,16 @@ const ProcessingScreen: React.FC<ProcessingScreenProps> = ({ navigate, selectedM
                       key={str.id}
                       className="flex items-center justify-between gap-2 rounded-xl border border-gray-100 px-3 py-2"
                     >
-                      <span className="truncate text-sm text-gray-700">{str.text}</span>
+                      <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={str.masked}
+                          onChange={() => handleToggleStringMask(str.id)}
+                          className="h-4 w-4 shrink-0 accent-emerald-500"
+                          aria-label={`${str.text}のモザイクを切り替え`}
+                        />
+                        <span className="truncate text-sm text-gray-700">{str.text}</span>
+                      </label>
                       <span
                         className={`flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-bold ${style.badge}`}
                       >
