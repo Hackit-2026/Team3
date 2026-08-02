@@ -1,0 +1,28 @@
+# ============================================================
+# 統合アプリ（顔モザイク＋文字モザイク）の依存パッケージ
+# 元の face/requirements.txt と word/backend/requirements.txt を
+# 1つのPython環境で同居できるようにまとめたもの。
+# ============================================================
+
+# --- 統合画面 ＆ 顔モザイク（face/app.py）---
+streamlit>=1.37.1
+mediapipe==1.0.0
+numpy>=2.1.0
+Pillow>=10.4.0
+protobuf>=5.26.1,<6.0dev
+opencv-python-headless>=4.10.0.84
+
+# --- 文字モザイク（word/backend）---
+fastapi
+uvicorn[standard]
+python-multipart
+paddlepaddle
+paddleocr
+requests
+python-dotenv
+
+# 注意:
+# word/backend/requirements.txt にある opencv-python はここでは意図的に外している。
+# 同じ cv2 を提供する opencv-python-headless（顔モザイク側の指定）と同居させると、
+# 互いのファイルを上書きして両方が壊れることがあるため headless 版に一本化した。
+# 文字モザイクが使う cv2.imdecode は headless 版でも問題なく動くことを確認済み。
