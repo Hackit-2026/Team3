@@ -2,11 +2,15 @@ import re
 
 import cv2
 import numpy as np
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from paddleocr import PaddleOCR
 
-import llm_classifier
+# llm_classifier はインポート時に環境変数を読むため、.env の読み込みを先に行う。
+load_dotenv()
+
+import llm_classifier  # noqa: E402
 
 app = FastAPI(title="Text Mosaic Detection API")
 

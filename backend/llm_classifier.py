@@ -2,11 +2,24 @@ import os
 
 import requests
 
-# 別端末（同一ネットワーク上）で動かすローカルLLM（Ollama互換API）のエンドポイント。
-# 例: "http://192.168.1.50:11434"。未設定の間は常に判定不能（＝安全側でモザイク対象）扱いになる。
+# 別端末で動かすローカルLLM（Ollama互換API）を、Cloudflare Tunnel（cloudflared）経由で
+# 公開されたHTTPS URLで呼び出す。デスクトップ側で
+#   cloudflared tunnel --url http://localhost:11434
+# を実行すると発行される "https://xxxx-xxxx.trycloudflare.com" 等をそのまま設定する。
+# ルーターのポート開放は不要（デスクトップ側からの outbound 接続のみで完結する）。
+# 未設定の間は常に判定不能（＝安全側でモザイク対象）扱いになる。
 LOCAL_LLM_BASE_URL = os.environ.get("LOCAL_LLM_BASE_URL", "")
 LOCAL_LLM_MODEL = os.environ.get("LOCAL_LLM_MODEL", "llama3.1")
-LOCAL_LLM_TIMEOUT_SEC = float(os.environ.get("LOCAL_LLM_TIMEOUT_SEC", "8"))
+
+# Cloudflare Tunnel はインターネットを経由するため、同一LAN内より応答が遅くなる
+# ことを見込んでタイムアウトを長めに取る。
+LOCAL_LLM_TIMEOUT_SEC = float(os.environ.get("LOCAL_LLM_TIMEOUT_SEC", "15"))
+
+# Cloudflare Quick Tunnel のURLは推測困難だが認証なしで誰でも呼び出せてしまうため、
+# 合言葉（共有トークン）を設定できるようにする。デスクトップ側のLLMサーバーの前段に
+# このトークンを検証するプロキシ（例: 簡易authミドルウェア）を置く運用を想定。
+# 未設定なら送信しない（LAN内で完結する接続方式に戻したい場合はこれで問題ない）。
+LOCAL_LLM_API_KEY = os.environ.get("LOCAL_LLM_API_KEY", "")
 
 # 「一般に広く知られている情報だけを公開扱いにする」という発想の反転を実現するための
 # システムプロンプト。RAGで事前登録されていない社外秘語句も、これで一定拾えるようにする。
@@ -36,6 +49,10 @@ def is_public_text(text: str) -> bool:
     if not is_configured():
         return False
 
+    headers = {}
+    if LOCAL_LLM_API_KEY:
+        headers["Authorization"] = f"Bearer {LOCAL_LLM_API_KEY}"
+
     try:
         response = requests.post(
             f"{LOCAL_LLM_BASE_URL}/api/generate",
@@ -45,6 +62,7 @@ def is_public_text(text: str) -> bool:
                 "prompt": text,
                 "stream": False,
             },
+            headers=headers,
             timeout=LOCAL_LLM_TIMEOUT_SEC,
         )
         response.raise_for_status()

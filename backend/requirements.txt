@@ -6,3 +6,4 @@ paddleocr
 opencv-python
 numpy
 requests
+python-dotenv

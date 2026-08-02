@@ -8,6 +8,9 @@ photo/
 __pycache__/
 *.pyc
 
+# ローカルLLM接続先URLなどの環境設定（人によって値が異なるため管理対象外）
+backend/.env
+
 # 検証用に作成したスクラッチファイル（デバッグ出力・一時スクリプト）
 backend/tune_threshold.py
 backend/visualize_boxes.py

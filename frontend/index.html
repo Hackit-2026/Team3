@@ -59,7 +59,7 @@
   #detectedTextsList li {
     display: flex;
     gap: 8px;
-    align-items: baseline;
+    align-items: center;
     border: 1px solid #ddd;
     border-radius: 4px;
     padding: 6px 10px;
@@ -197,6 +197,15 @@ function renderTextsList() {
     const li = document.createElement("li");
     if (!box.enabled) li.classList.add("disabled");
 
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = box.enabled;
+    checkbox.title = "モザイクを適用する";
+    checkbox.addEventListener("change", () => {
+      box.enabled = checkbox.checked;
+      redraw();
+    });
+
     const idSpan = document.createElement("span");
     idSpan.className = "text-id";
     idSpan.textContent = box.id;
@@ -205,6 +214,7 @@ function renderTextsList() {
     textSpan.className = "text-content";
     textSpan.textContent = box.text ? box.text : "(手動追加)";
 
+    li.appendChild(checkbox);
     li.appendChild(idSpan);
     li.appendChild(textSpan);
     detectedTextsList.appendChild(li);
