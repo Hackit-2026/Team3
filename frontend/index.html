@@ -75,6 +75,22 @@
   }
   #detectedTextsList .text-content {
     word-break: break-all;
+    flex: 1;
+  }
+  #detectedTextsList .text-label {
+    flex-shrink: 0;
+    font-size: 0.8em;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-weight: bold;
+  }
+  #detectedTextsList .text-label.private {
+    background: #fdd;
+    color: #a00;
+  }
+  #detectedTextsList .text-label.public {
+    background: #dfd;
+    color: #070;
   }
 </style>
 </head>
@@ -217,6 +233,14 @@ function renderTextsList() {
     li.appendChild(checkbox);
     li.appendChild(idSpan);
     li.appendChild(textSpan);
+
+    if (box.label) {
+      const labelSpan = document.createElement("span");
+      labelSpan.className = `text-label ${box.label}`;
+      labelSpan.textContent = box.label;
+      li.appendChild(labelSpan);
+    }
+
     detectedTextsList.appendChild(li);
   }
 }
@@ -334,7 +358,17 @@ fileInput.addEventListener("change", async (evt) => {
     }
     const data = await res.json();
 
-    state.boxes = data.texts.map((t) => ({ id: t.id, x: t.x, y: t.y, w: t.w, h: t.h, enabled: true, text: t.text }));
+    // public と判定された文字列は初期状態でモザイクを外しておく（private は従来通り既定でON）。
+    state.boxes = data.texts.map((t) => ({
+      id: t.id,
+      x: t.x,
+      y: t.y,
+      w: t.w,
+      h: t.h,
+      enabled: t.label !== "public",
+      text: t.text,
+      label: t.label,
+    }));
     redraw();
     setStatus(`${state.boxes.length} 件の文字候補を検出しました。`);
   } catch (err) {

@@ -118,20 +118,27 @@ async def detect_text(file: UploadFile = File(...)):
     texts = filter_tiny_boxes(texts, MIN_BOX_SIZE_PX)
 
     # 正規表現で強いシグナル（メール/電話/住所など）が取れた行は、LLMを呼ばずに
-    # 即座にモザイク確定させる（通信不要で確実、ローカルLLM未接続でも最低限の
+    # 即座に private 確定させる（通信不要で確実、ローカルLLM未接続でも最低限の
     # 保護を維持できる）。前後の文字も含めて隠せるよう行全体に幅を拡張する。
-    sensitive = [t for t in texts if is_sensitive_line(t["text"])]
+    sensitive = [{**t, "label": "private"} for t in texts if is_sensitive_line(t["text"])]
     other = [t for t in texts if not is_sensitive_line(t["text"])]
     sensitive = expand_to_full_line(sensitive, image_width)
 
-    # 残りは「一般に広く知られている公開情報だとLLMが確信した場合のみ隠さない」
-    # という発想の反転判定に委ねる。既定はモザイク対象とし、面積の大小では判定
-    # しない（看板のような大きな文字列でも、公開情報だと判定されなければ隠す）。
-    # LLM未接続・応答不能な場合は安全側（＝隠す）に倒れる。こちらは行全体には
-    # 拡張せず、検出された枠のまま隠す。
-    llm_flagged = [t for t in other if not llm_classifier.is_public_text(t["text"])]
+    # 残りは「一般に広く知られている公開情報だとLLMが確信した場合のみ public」
+    # という発想の反転判定に委ねる。1件ずつではなく、まとめて1回のリクエストで
+    # 問い合わせる（デスクトップ側のエンドポイントがバッチ形式のため）。
+    # LLM未接続・応答不能な場合は安全側（＝private）に倒れる。判定結果はすべて
+    # 返し、public/private のラベルを付ける（public を黙って除外せず、なぜ
+    # 隠れていないかをフロント側で確認できるようにする）。
+    classification = llm_classifier.classify_texts(
+        [{"id": str(i), "text": t["text"]} for i, t in enumerate(other)]
+    )
+    labeled_other = [
+        {**t, "label": "public" if classification.get(str(i), False) else "private"}
+        for i, t in enumerate(other)
+    ]
 
-    texts = sensitive + llm_flagged
+    texts = sensitive + labeled_other
 
     return {
         "status": "success",
@@ -145,6 +152,7 @@ async def detect_text(file: UploadFile = File(...)):
                 "w": t["w"],
                 "h": t["h"],
                 "text": t["text"],
+                "label": t["label"],
             }
             for i, t in enumerate(texts)
         ],
