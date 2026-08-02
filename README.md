@@ -1,78 +1,32 @@
-# チーム名
+# React + TypeScript + Vite
 
-DDM👾
+This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
 
-# プロダクト名
+Currently, two official plugins are available:
 
-機密情報保護カメラ「カクカク」
+- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
+- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
 
-## 概要
+## React Compiler
 
-何を作ったのかを3〜5行程度で説明してください。
+The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
 
-## デモ
+## Expanding the Oxlint configuration
 
-以下を掲載してください。
+If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
 
-- 発表資料URL（必須）
-- デモURL（任意）
-- デモ動画（任意）
-- スクリーンショット（1枚以上推奨）
-
-## システム構成
-
-アプリケーション全体の構成が分かる図や説明を記載してください。
-
-## 背景・課題
-
-なぜこのプロダクトを作ったのか、どのような課題を解決したいのかを記載してください。
-
-## 主な機能
-
-- 機能1
-- 機能2
-- 機能3
-
-## 工夫した点・こだわった点
-
-技術面・UI/UX・アイデア面など、特に工夫した点やチャレンジした点を記載してください。
-
-## 使用技術
-
-- フロントエンド：
-- バックエンド：
-- AI / API：
-- データベース：
-- インフラ：
-- その他：
-
-## 今後の展望
-
-今後追加したい機能や改善したい点を記載してください。
-
-## セットアップ方法
-
-ローカルで実行する場合の手順を記載してください。
-
-例
-
-```bash
-git clone <repository-url>
-cd <repository-name>
-
-# 必要なライブラリをインストール
-...
-
-# 起動
-...
+```json
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["react", "typescript", "oxc"],
+  "options": {
+    "typeAware": true
+  },
+  "rules": {
+    "react/rules-of-hooks": "error",
+    "react/only-export-components": ["warn", { "allowConstantExport": true }]
+  }
+}
 ```
 
-## メンバー
-
-| 名前 | 担当 |
-|------|------|
-|久藤豊也|   PM   |
-|石山雅治|   OCR   |
-|谷内清吾|顔認識|
-|朝井咲陽|顔認識|
-|小川輪生|フロントエンド|
+See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
