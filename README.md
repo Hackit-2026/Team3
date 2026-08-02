@@ -23,7 +23,8 @@ SNSなどに画像を上げる際に個人情報である顔の画像と書類�
 
 ## システム構成
 
-アプリケーション全体の構成が分かる図や説明を記載してください。
+<img width="503" height="407" alt="image" src="https://github.com/user-attachments/assets/ea0fcc51-fae1-4102-ab9c-63d7944942b8" />
+
 
 ## 背景・課題
 
