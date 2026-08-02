@@ -23,7 +23,8 @@ DDM👾
 
 ## システム構成
 
-<img width="251" height="175" alt="image" src="https://github.com/user-attachments/assets/daa7cbee-b088-4eb3-820b-15c257aa52d8" />
+<img width="278" height="181" alt="image" src="https://github.com/user-attachments/assets/e2a50ac4-ddbb-488f-9cda-18fc263e59aa" />
+
 
 
 ## 背景・課題
