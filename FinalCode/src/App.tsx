@@ -662,7 +662,6 @@ const ProcessingScreen: React.FC<ProcessingScreenProps> = ({
 
   // モザイク設定のState群（これらをコア処理に渡す）
   const [detectMode, setDetectMode] = useState<string>('顔 + 文字列');
-  const [maskTarget, setMaskTarget] = useState<string>('未登録の顔のみ');
   const [maskShape, setMaskShape] = useState<string>('長方形');
   const [faceAccuracy, setFaceAccuracy] = useState<string>('標準');
   const [maskTargetParts, setMaskTargetParts] = useState<string[]>(['顔全体']);
@@ -773,7 +772,7 @@ const ProcessingScreen: React.FC<ProcessingScreenProps> = ({
         includeFaces
           ? detectFaces(
               sourceBlob,
-              whitelistEnabled && maskTarget === '未登録の顔のみ',
+              whitelistEnabled,
               FACE_ACCURACY_MAP[faceAccuracy] ?? 'standard',
               maskTargetParts,
               [...enabledWhitelistIds].map(String),
@@ -884,22 +883,13 @@ const ProcessingScreen: React.FC<ProcessingScreenProps> = ({
             <ChevronDown className="h-4 w-4 text-gray-400 transition-transform group-open:rotate-180" />
           </summary>
           <div className="space-y-4 p-3.5 text-sm">
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className={labelClass}>検出モード</label>
-                <select value={detectMode} onChange={(e) => setDetectMode(e.target.value)} className={inputClass}>
-                  <option>顔 + 文字列</option>
-                  <option>顔のみ</option>
-                  <option>文字列のみ</option>
-                </select>
-              </div>
-              <div>
-                <label className={labelClass}>マスク対象</label>
-                <select value={maskTarget} onChange={(e) => setMaskTarget(e.target.value)} className={inputClass}>
-                  <option>すべて</option>
-                  <option>未登録の顔のみ</option>
-                </select>
-              </div>
+            <div>
+              <label className={labelClass}>検出モード</label>
+              <select value={detectMode} onChange={(e) => setDetectMode(e.target.value)} className={inputClass}>
+                <option>顔 + 文字列</option>
+                <option>顔のみ</option>
+                <option>文字列のみ</option>
+              </select>
             </div>
 
             <div>
