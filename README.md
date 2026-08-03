@@ -84,18 +84,18 @@ https://github.com/user-attachments/assets/60c0fd4e-17f5-4225-9f2f-383cc1c5c447
  1. フォルダ構成
 --------------------------------------------------------------------
   FinalCode\ <br>
-    ├ backend\             バックエンド（FastAPI） <br>
-    │   ├ main.py            APIエンドポイント一式 <br>
-    │   ├ face_engine.py      顔検出・ホワイトリスト照合ロジック <br>
-    │   ├ llm_classifier.py   文字列の公開/非公開判定（ローカルLLM連携） <br>
-    │   ├ requirements.txt    Python依存パッケージ一覧 <br>
-    │   ├ .env.example        環境変数のひな形（.envにコピーして使う） <br>
-    │   ├ mp_models\          （初回起動時に自動生成・ダウンロード） <br>
-    │   └ whitelist_store.pkl （初回登録時に自動生成） <br>
-    ├ src\                  フロントエンド（React）のソースコード <br>
-    ├ public\icon.png       アプリのアイコン <br>
-    ├ package.json / vite.config.ts / tsconfig*.json など <br>
-    └ 手順書.txt            （このファイル） <br>
+&ensp;    ├ backend\             バックエンド（FastAPI） <br>
+&ensp;    │   ├ main.py            APIエンドポイント一式 <br>
+&ensp;    │   ├ face_engine.py      顔検出・ホワイトリスト照合ロジック <br>
+&ensp;    │   ├ llm_classifier.py   文字列の公開/非公開判定（ローカルLLM連携） <br>
+&ensp;    │   ├ requirements.txt    Python依存パッケージ一覧 <br>
+&ensp;    │   ├ .env.example        環境変数のひな形（.envにコピーして使う） <br>
+&ensp;    │   ├ mp_models\          （初回起動時に自動生成・ダウンロード） <br>
+&ensp;    │   └ whitelist_store.pkl （初回登録時に自動生成） <br>
+&ensp;    ├ src\                  フロントエンド（React）のソースコード <br>
+&ensp;    ├ public\icon.png       アプリのアイコン <br>
+&ensp;    ├ package.json / vite.config.ts / tsconfig*.json など <br>
+&ensp;    └ 手順書.txt            （このファイル） <br>
 
 
 --------------------------------------------------------------------
@@ -106,28 +106,28 @@ https://github.com/user-attachments/assets/60c0fd4e-17f5-4225-9f2f-383cc1c5c447
     ・Python 3.11〜3.13程度（mediapipe / paddleocr が対応するバージョン）
     ・Git
 
-  (1) バックエンドの準備
-        cd FinalCode\backend
-        python -m venv venv
-        venv\Scripts\activate
-        pip install -r requirements.txt
+  (1) バックエンドの準備　<br>
+&emsp;&emsp;  cd FinalCode\backend　<br>
+&emsp;&emsp;  python -m venv venv　<br>
+&emsp;&emsp;  venv\Scripts\activate　<br>
+&emsp;&emsp;  pip install -r requirements.txt　<br>
 
       ローカルLLMによる文字列の公開/非公開判定を使う場合のみ、
       .env.example を .env にコピーして LOCAL_LLM_BASE_URL 等を設定します。
       未設定でも動きます。その場合は「判定できない＝安全側」に倒れ、
       検出した文字列はすべて private（モザイクON）扱いになります。
 
-  (2) フロントエンドの準備
-        cd FinalCode
-        npm install
+  (2) フロントエンドの準備 <br>
+&emsp;&emsp;  cd FinalCode <br>
+&emsp;&emsp;  npm install <br>
 
   (3) 顔検出モデルについて
       初回に顔検出処理を実行したタイミングで、以下のモデルファイルを
-      自動でダウンロードします（backend\mp_models\ に保存）。
-        ・face_landmarker.task
-        ・blaze_face_full_range.tflite
-        ・mobilenet_v3_small.tflite
-      このときだけインターネット接続が必要です。以降はキャッシュされます。
+      自動でダウンロードします（backend\mp_models\ に保存）。 <br>
+&ensp; ・ face_landmarker.task <br>
+&ensp; ・ blaze_face_full_range.tflite <br>
+&ensp; ・ mobilenet_v3_small.tflite <br>
+&ensp;　このときだけインターネット接続が必要です。以降はキャッシュされます。
 ...
 
 # 起動
@@ -149,8 +149,8 @@ https://github.com/user-attachments/assets/60c0fd4e-17f5-4225-9f2f-383cc1c5c447
 
   フロントエンドは既定で http://localhost:8000 のバックエンドを見に
   行きます。バックエンドを別のホスト/ポートで動かす場合は、
-  FinalCode 直下に .env.local を作り
-        VITE_API_BASE_URL=http://<ホスト>:<ポート>
+  FinalCode 直下に .env.local を作り <br>
+&emsp;&emsp;        VITE_API_BASE_URL=http://<ホスト>:<ポート> <br>
   を設定してください。
 
   npm run dev が表示するURL（通常 http://localhost:5173）をブラウザで
