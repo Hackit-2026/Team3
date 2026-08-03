@@ -20,11 +20,7 @@ SNSなどに画像を上げる際に個人情報である顔の画像と書類�
 - デモURL（任意）
 - デモ動画（任意）
 
-
-https://github.com/user-attachments/assets/ff315cc2-bee7-4505-abd7-0c799164a807
-
-<video src="https://github.com/user-attachments/assets/ff315cc2-bee7-4505-abd7-0c799164a807" width="600" controls></video>
-
+https://github.com/user-attachments/assets/60c0fd4e-17f5-4225-9f2f-383cc1c5c447
 
 - スクリーンショット（1枚以上推奨）
 <img width="540" height="360" alt="スクリーンショット 2026-08-02 223855" src="https://github.com/user-attachments/assets/416c313c-7a1a-4cfd-b139-c59f1890159f" />
