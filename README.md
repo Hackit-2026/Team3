@@ -126,7 +126,6 @@ https://github.com/user-attachments/assets/60c0fd4e-17f5-4225-9f2f-383cc1c5c447
 &ensp; ・ blaze_face_full_range.tflite <br>
 &ensp; ・ mobilenet_v3_small.tflite <br>
 &ensp;　このときだけインターネット接続が必要です。以降はキャッシュされます。
-...
 
 # 起動
 
