@@ -17,7 +17,6 @@ SNSなどに画像を上げる際に個人情報である顔の画像と書類�
 以下を掲載してください。
 
 - 発表資料URL（必須）https://kitm365-my.sharepoint.com/:p:/g/personal/c1514542_st_kanazawa-it_ac_jp/IQDLbo9CmvO3Qb45oXDk_0KsAXRuKi8zoPWdCob1n7d3S-w?e=TLZZBI
-- デモURL（任意）
 - デモ動画（任意）
   
 https://github.com/user-attachments/assets/60c0fd4e-17f5-4225-9f2f-383cc1c5c447  
@@ -69,8 +68,7 @@ https://github.com/user-attachments/assets/60c0fd4e-17f5-4225-9f2f-383cc1c5c447
 - バックエンド：Python 3.13, FastAPI 0.141, uvicorn 0.52, StaticFiles, CORS Middleware
 - AI / API：MediaPipe Tasks API 1.0, BlazeFace Full Range, MobileNetV3-Small, PaddleOCR 3.7, PaddlePaddle 3.3, Ollama, gemma-4-e4b-it-q5_k_m, 
 - データベース：利用していない
-- インフラ：Cloudflare Tunne, Windows ローカル実行, 
-- その他：
+- インフラ：Cloudflare Tunne, Windows ローカル実行
 
 ## 今後の展望
 
@@ -131,7 +129,6 @@ https://github.com/user-attachments/assets/60c0fd4e-17f5-4225-9f2f-383cc1c5c447
 ...
 
 # 起動
-...
 
 --------------------------------------------------------------------
  3. 起動のしかた
@@ -156,7 +153,6 @@ https://github.com/user-attachments/assets/60c0fd4e-17f5-4225-9f2f-383cc1c5c447
   npm run dev が表示するURL（通常 http://localhost:5173）をブラウザで
   開けば使用できます。
   
-...
 
 ## メンバー
 
