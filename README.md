@@ -25,7 +25,8 @@ https://github.com/user-attachments/assets/60c0fd4e-17f5-4225-9f2f-383cc1c5c447
 - スクリーンショット（1枚以上推奨）
 <img width="450" height="300" alt="スクリーンショット 2026-08-02 223855" src="https://github.com/user-attachments/assets/416c313c-7a1a-4cfd-b139-c59f1890159f" />
 <img width="450" height="300" alt="スクリーンショット 2026-08-02 223919" src="https://github.com/user-attachments/assets/bb6c59c1-c097-4fe9-9b64-b03569120447" />
-<img width="450" height="300" alt="スクリーンショット 2026-08-02 223940" src="https://github.com/user-attachments/assets/29caf609-afc7-403f-90eb-fb2722fc55d6" /> \n
+<img width="450" height="300" alt="スクリーンショット 2026-08-02 223940" src="https://github.com/user-attachments/assets/29caf609-afc7-403f-90eb-fb2722fc55d6" />
+<br>
 <img width="450" height="300" alt="スクリーンショット 2026-08-02 224008" src="https://github.com/user-attachments/assets/049c2aa0-374c-4a42-b67d-7974e5e62441" />
 <img width="450" height="300" alt="スクリーンショット 2026-08-02 224142" src="https://github.com/user-attachments/assets/6541da3e-a098-40be-8a42-9bd27900b5ee" />
 
