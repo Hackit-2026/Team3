@@ -19,7 +19,7 @@ SNSなどに画像を上げる際に個人情報である顔の画像と書類�
 - 発表資料URL（必須）
 - デモURL（任意）
 - デモ動画（任意）
-- 
+  
 https://github.com/user-attachments/assets/60c0fd4e-17f5-4225-9f2f-383cc1c5c447  
 
 - スクリーンショット（1枚以上推奨）
@@ -29,7 +29,8 @@ https://github.com/user-attachments/assets/60c0fd4e-17f5-4225-9f2f-383cc1c5c447
 <br>
 <img width="450" height="300" alt="スクリーンショット 2026-08-02 224008" src="https://github.com/user-attachments/assets/049c2aa0-374c-4a42-b67d-7974e5e62441" />
 <img width="450" height="300" alt="スクリーンショット 2026-08-02 224142" src="https://github.com/user-attachments/assets/6541da3e-a098-40be-8a42-9bd27900b5ee" />
-
+<img width="450" height="300" alt="IMG_4544" src="https://github.com/user-attachments/assets/41828f20-4d83-497b-9d31-41537825c341" />
+<img width="450" height="300" alt="スクリーンショット 2026-08-03 002835" src="https://github.com/user-attachments/assets/77eb94d2-d269-40f4-bbe5-fb467f0db156" />
 
 
 ## システム構成
