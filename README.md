@@ -19,7 +19,8 @@ SNSなどに画像を上げる際に個人情報である顔の画像と書類�
 - 発表資料URL（必須）
 - デモURL（任意）
 - デモ動画（任意）
-
+<video width="540" height="360" alt="demo" src="https://github.com/user-attachments/assets/60c0fd4e-17f5-4225-9f2f-383cc1c5c447
+" />
 https://github.com/user-attachments/assets/60c0fd4e-17f5-4225-9f2f-383cc1c5c447
 
 - スクリーンショット（1枚以上推奨）
