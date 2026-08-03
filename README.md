@@ -82,11 +82,79 @@ https://github.com/user-attachments/assets/60c0fd4e-17f5-4225-9f2f-383cc1c5c447
 
 例
 
-```bash
-git clone <repository-url>
-cd <repository-name>
+--------------------------------------------------------------------
+ 1. フォルダ構成
+--------------------------------------------------------------------
+  FinalCode\
+    ├ backend\             バックエンド（FastAPI）
+    │   ├ main.py            APIエンドポイント一式
+    │   ├ face_engine.py      顔検出・ホワイトリスト照合ロジック
+    │   ├ llm_classifier.py   文字列の公開/非公開判定（ローカルLLM連携）
+    │   ├ requirements.txt    Python依存パッケージ一覧
+    │   ├ .env.example        環境変数のひな形（.envにコピーして使う）
+    │   ├ mp_models\          （初回起動時に自動生成・ダウンロード）
+    │   └ whitelist_store.pkl （初回登録時に自動生成）
+    ├ src\                  フロントエンド（React）のソースコード
+    ├ public\icon.png       アプリのアイコン
+    ├ package.json / vite.config.ts / tsconfig*.json など
+    └ 手順書.txt            （このファイル）
 
-# 必要なライブラリをインストール
+
+--------------------------------------------------------------------
+ 2. 初回だけ行う準備
+--------------------------------------------------------------------
+  必要なもの:
+    ・Node.js 18以上
+    ・Python 3.11〜3.13程度（mediapipe / paddleocr が対応するバージョン）
+    ・Git
+
+  (1) バックエンドの準備
+        cd FinalCode\backend
+        python -m venv venv
+        venv\Scripts\activate
+        pip install -r requirements.txt
+
+      ローカルLLMによる文字列の公開/非公開判定を使う場合のみ、
+      .env.example を .env にコピーして LOCAL_LLM_BASE_URL 等を設定します。
+      未設定でも動きます。その場合は「判定できない＝安全側」に倒れ、
+      検出した文字列はすべて private（モザイクON）扱いになります。
+
+  (2) フロントエンドの準備
+        cd FinalCode
+        npm install
+
+  (3) 顔検出モデルについて
+      初回に顔検出処理を実行したタイミングで、以下のモデルファイルを
+      自動でダウンロードします（backend\mp_models\ に保存）。
+        ・face_landmarker.task
+        ・blaze_face_full_range.tflite
+        ・mobilenet_v3_small.tflite
+      このときだけインターネット接続が必要です。以降はキャッシュされます。
+
+
+--------------------------------------------------------------------
+ 3. 起動のしかた
+--------------------------------------------------------------------
+  ターミナルを2つ開いて、それぞれで実行します。
+
+    1つ目（バックエンド）:
+        cd FinalCode\backend
+        venv\Scripts\activate
+        python -m uvicorn main:app --host 127.0.0.1 --port 8000
+
+    2つ目（フロントエンド）:
+        cd FinalCode
+        npm run dev
+
+  フロントエンドは既定で http://localhost:8000 のバックエンドを見に
+  行きます。バックエンドを別のホスト/ポートで動かす場合は、
+  FinalCode 直下に .env.local を作り
+        VITE_API_BASE_URL=http://<ホスト>:<ポート>
+  を設定してください。
+
+  npm run dev が表示するURL（通常 http://localhost:5173）をブラウザで
+  開けば使用できます。
+
 ...
 
 # 起動
