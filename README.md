@@ -16,7 +16,7 @@ SNSなどに画像を上げる際に個人情報である顔の画像と書類�
 
 以下を掲載してください。
 
-- 発表資料URL（必須）
+- 発表資料URL（必須）https://kitm365-my.sharepoint.com/:p:/g/personal/c1514542_st_kanazawa-it_ac_jp/IQDLbo9CmvO3Qb45oXDk_0KsAXRuKi8zoPWdCob1n7d3S-w?e=TLZZBI
 - デモURL（任意）
 - デモ動画（任意）
   
