@@ -99,10 +99,10 @@ https://github.com/user-attachments/assets/60c0fd4e-17f5-4225-9f2f-383cc1c5c447
 --------------------------------------------------------------------
  2. 初回だけ行う準備
 --------------------------------------------------------------------
-  必要なもの:
-    ・Node.js 18以上
-    ・Python 3.11〜3.13程度（mediapipe / paddleocr が対応するバージョン）
-    ・Git
+  必要なもの: <br>
+&emsp; ・Node.js 18以上 <br>
+&emsp; ・Python 3.11〜3.13程度（mediapipe / paddleocr が対応するバージョン） <br>
+&emsp; ・Git <br>
 
   (1) バックエンドの準備　<br>
 &emsp;&emsp;  cd FinalCode\backend　<br>
