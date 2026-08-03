@@ -80,24 +80,22 @@ https://github.com/user-attachments/assets/60c0fd4e-17f5-4225-9f2f-383cc1c5c447
 
 ローカルで実行する場合の手順を記載してください。
 
-例
-
 --------------------------------------------------------------------
  1. フォルダ構成
 --------------------------------------------------------------------
-  FinalCode\
-    ├ backend\             バックエンド（FastAPI）
-    │   ├ main.py            APIエンドポイント一式
-    │   ├ face_engine.py      顔検出・ホワイトリスト照合ロジック
-    │   ├ llm_classifier.py   文字列の公開/非公開判定（ローカルLLM連携）
-    │   ├ requirements.txt    Python依存パッケージ一覧
-    │   ├ .env.example        環境変数のひな形（.envにコピーして使う）
-    │   ├ mp_models\          （初回起動時に自動生成・ダウンロード）
-    │   └ whitelist_store.pkl （初回登録時に自動生成）
-    ├ src\                  フロントエンド（React）のソースコード
-    ├ public\icon.png       アプリのアイコン
-    ├ package.json / vite.config.ts / tsconfig*.json など
-    └ 手順書.txt            （このファイル）
+  FinalCode\ <br>
+    ├ backend\             バックエンド（FastAPI） <br>
+    │   ├ main.py            APIエンドポイント一式 <br>
+    │   ├ face_engine.py      顔検出・ホワイトリスト照合ロジック <br>
+    │   ├ llm_classifier.py   文字列の公開/非公開判定（ローカルLLM連携） <br>
+    │   ├ requirements.txt    Python依存パッケージ一覧 <br>
+    │   ├ .env.example        環境変数のひな形（.envにコピーして使う） <br>
+    │   ├ mp_models\          （初回起動時に自動生成・ダウンロード） <br>
+    │   └ whitelist_store.pkl （初回登録時に自動生成） <br>
+    ├ src\                  フロントエンド（React）のソースコード <br>
+    ├ public\icon.png       アプリのアイコン <br>
+    ├ package.json / vite.config.ts / tsconfig*.json など <br>
+    └ 手順書.txt            （このファイル） <br>
 
 
 --------------------------------------------------------------------
@@ -130,7 +128,10 @@ https://github.com/user-attachments/assets/60c0fd4e-17f5-4225-9f2f-383cc1c5c447
         ・blaze_face_full_range.tflite
         ・mobilenet_v3_small.tflite
       このときだけインターネット接続が必要です。以降はキャッシュされます。
+...
 
+# 起動
+...
 
 --------------------------------------------------------------------
  3. 起動のしかた
@@ -155,10 +156,6 @@ https://github.com/user-attachments/assets/60c0fd4e-17f5-4225-9f2f-383cc1c5c447
   npm run dev が表示するURL（通常 http://localhost:5173）をブラウザで
   開けば使用できます。
 
-...
-
-# 起動
-...
 ```
 
 ## メンバー
